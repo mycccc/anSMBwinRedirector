@@ -30,17 +30,19 @@ Windows SMB Client
         │  TCP: 动态临时端口 → AndroidIP:445
         ▼
 anSMBwinHelper
-        │  透明改写“目的端口”：AndroidIP:445 → AndroidIP:4450
-        │  （目的 IP 不变；不改 Windows 源端口）
+        │  透明改写“目的端口”：AndroidIP:445 → AndroidIP:<AndroidPort>
+        │  （<AndroidPort> 可配置，默认 4450；目的 IP 不变；不改 Windows 源端口）
         ▼
-Android anSMBserver（真正监听 TCP 4450）
-        │  TCP 响应：AndroidIP:4450 → Windows 动态临时端口
+Android anSMBserver（真正监听该可配置端口）
+        │  TCP 响应：AndroidIP:<AndroidPort> → Windows 动态临时端口
         ▼
 anSMBwinHelper
-        │  透明恢复“源端口”：4450 → 445
+        │  透明恢复“源端口”：<AndroidPort> → 445
         ▼
 Windows SMB Client（全程认为自己在于 AndroidIP:445 通信）
 ```
+
+> 图示为**单条规则**。本项目**支持多条规则**：局域网内可同时存在多台运行 anSMBserver 的 Android 设备，**每台一条规则**，各自映射到自己的 Android SMB 端口（见 §1.1）。
 
 ## 1.1 网络模型（正式定义）
 
@@ -48,7 +50,13 @@ Windows SMB Client（全程认为自己在于 AndroidIP:445 通信）
 
 关键约束（不得理解错）：
 
-* **Android 不监听 TCP 445**；Android 实际监听的端口是 **TCP 4450**（根因：Android 应用无法绑定 < 1024 的特权端口）。
+* **Android 不监听 TCP 445**；Android 实际监听的是一个**可配置的 SMB 端口（默认 TCP 4450）**（根因：Android 应用无法绑定 < 1024 的特权端口，故不能用 445）。
+* **该端口不得写死为 4450**：anSMBserver 的监听端口可被用户修改。
+* **支持多个 Android 目标**：局域网内可能同时存在多台运行 anSMBserver 的设备，**每台对应一条规则**。**多规则 ≠ 通用 NAT。**
+* **每条规则只有两项可配**：`Android IP`（在规则集合内**唯一**）+ `Android SMB Port`（默认 4450）。
+  Windows 目的端口 **TCP 445** 与协议 **TCP** 是**全局固定项**，不属于任何单条规则，也不暴露为配置。
+* ⛔ **不得**把 `Windows TCP 445` 单独当成一条规则的**目标**——规则的 Windows 侧匹配目标是**派生**的 `AndroidIP:445`。
+* **不要因此做成通用 NAT**：不允许"任意 FROM → 任意 TO"，也不允许任意协议、UDP、TCP/UDP 选择或代理。
 * **Windows 侧不需要监听 TCP 445**；Windows 侧只有 SMB 客户端的**动态临时源端口**。
 * 目的 IP **保持不变**（始终是 Android IP）。
 * Helper **不承担** SMB Server / SMB Client 职责，**不是**普通 TCP Proxy，**不是** `netsh portproxy` 形式的本地端口转发。
@@ -105,7 +113,7 @@ WinDivert 是当前主要技术方向，但：
 
 阶段 1 需要验证包括但不限于：
 
-* TCP 445 → 4450 的处理
+* TCP 445 → Android 实际监听端口的处理（**端口可配置，默认 4450**）
 * 返回方向的数据处理
 * 地址/端口重写
 * TCP 连接状态
@@ -139,8 +147,9 @@ WinDivert 是当前主要技术方向，但：
 
 * **学习设计 ≠ 复制代码。**
 * 借鉴或引用第三方源码前，必须先确认其 License 与本项目 License 的兼容性。
-* **`detour` 当前仅作为参考实现，不作为代码依赖**；不得复制其 GPLv3 源代码。
-* **本项目 License 尚未确定**，不得自行选择（属需用户确认事项）；分发相关的第三方组件、驱动、License 与再分发要求须调查记录，见 §3.2 ⑩。
+* **`detour` 是本项目的 GPLv3 上游代码基础 / 重要参考实现**，允许在遵守 GPLv3 及相关第三方许可要求的前提下**复用和修改**其代码；**不要求**保留其通用 NAT / UDP / 多规则等能力，应按 anSMBwinHelper 的专用目标合理删减。
+* **本项目已决定采用 GPLv3**（2026-09-28）。第三方组件、驱动、License 与再分发要求仍须逐项调查并记录（见 §3.2 ⑩ 与 `local_dev/docs/DEVELOPMENT_PLAN.md` §9）。
+* GUI 库 `lxn/walk` **v1 接受**（记录其上游停滞的技术债，见 `local_dev/docs/decisions/003-gui-v1-information-architecture.md`）。
 
 ---
 
@@ -176,7 +185,7 @@ WinDivert 是当前主要技术方向，但：
 
 阶段 1 的唯一核心目标：
 
-> **证明 Windows 原生 SMB 客户端通过 anSMBwinHelper，可以可靠访问运行在 TCP 4450 上的 anSMBserver。**
+> **证明 Windows 原生 SMB 客户端通过 anSMBwinHelper，可以可靠访问运行在 Android 实际监听端口（默认 4450，**可配置**）上的 anSMBserver。**
 
 阶段 1 不负责：
 
@@ -207,8 +216,8 @@ WinDivert 是当前主要技术方向，但：
 Windows SMB Client
     ↓ TCP: <动态临时端口> → AndroidIP:445
 anSMBwinHelper
-    ↓ 透明改写目的端口 → AndroidIP:4450
-Android anSMBserver（真正监听 4450）
+    ↓ 透明改写目的端口 → AndroidIP:<AndroidPort>   （默认 4450，可配置）
+Android anSMBserver（真正监听 <AndroidPort>）
 ```
 
 能够正常建立连接。
@@ -802,8 +811,8 @@ Agent 的自主权分为三级。
 
 必须确认：
 
-* [ ] Windows 原生 SMB 客户端能够访问 TCP 4450 上的 anSMBserver
-* [ ] TCP 连接能够正常建立（客户端拨号 `AndroidIP:445`，Helper 透明改写为 `AndroidIP:4450`）
+* [ ] Windows 原生 SMB 客户端能够访问 Android 实际监听端口（**可配置，默认 4450**）上的 anSMBserver
+* [ ] TCP 连接能够正常建立（客户端拨号 `AndroidIP:445`，Helper 透明改写为 `AndroidIP:<AndroidPort>`）
 * [ ] SMB2/SMB3 实际通信正常
 * [ ] SMB 基本请求/响应正常
 * [ ] 多个 SMB 连接能够同时正常工作
@@ -812,7 +821,7 @@ Agent 的自主权分为三级。
 * [ ] 关闭后重新连接能够工作
 * [ ] 目标服务器不可用时 helper 不会异常崩溃
 * [ ] 目标服务器恢复后能够重新连接
-* [ ] 返回方向的流量处理正确（源端口 4450 → 445 正确还原）
+* [ ] 返回方向的流量处理正确（源端口 `<AndroidPort>` → 445 正确还原）
 * [ ] 目的端口改写逻辑经过验证，且不受 checksum offload / LSO 影响
 * [ ] 非目标流量不会被错误处理（已明确哪些流量会被处理、哪些不会）
 * [ ] 权限要求已经明确
@@ -1031,7 +1040,7 @@ Agent 不应为了让项目“看起来专业”而主动增加：
 当前最高优先级：
 
 ```text
-证明 Windows 原生 SMB → anSMBwinHelper → anSMBserver:4450
+证明 Windows 原生 SMB → anSMBwinHelper → anSMBserver（Android 实际监听端口，默认 4450，**可配置**）
 能够可靠工作。
 ```
 
@@ -1152,7 +1161,7 @@ tests/                          # 正式长期维护测试
 
 > **10. 先验证，再决策，再正式实现，再产品化。**
 
-> **11. 本项目是“透明 TCP 目的端口重定向”，不是本机端口转发；Android 只监听 4450，不监听 445。**
+> **11. 本项目是“透明 TCP 目的端口重定向”，不是本机端口转发，也不是通用 NAT；支持多 Android 目标（每台一条规则，Android IP 唯一）。Android 只监听其可配置的 SMB 端口（默认 4450），不监听 445；每条规则的 Windows 侧匹配目标是派生的 `AndroidIP:445`。**
 
 > **12. 优先复用成熟开源组件，不重复造轮子；参考实现不等于可以复制代码，必须遵守 License。**
 
@@ -1160,4 +1169,4 @@ tests/                          # 正式长期维护测试
 
 > **14. 测试以风险覆盖为目的，不为了阶段流程重复执行完全相同的测试。**
 
-> **15. 第三方参考实现的定位**：`detour` = **参考实现**，**不是代码依赖**；WinDivert 目前仍是**强候选但未正式选定**，须经阶段 1 实测后决策（见 §2.3、`local_dev/docs/DEVELOPMENT_PLAN.md`）。
+> **15. 定位**：`detour` 是**允许复用的 GPLv3 上游代码基础**（本项目采用 GPLv3），不要求保留其通用 NAT/UDP/多规则能力；WinDivert 仍是**强候选但未正式选定**，须经阶段 1 实测后决策；GUI 库 `lxn/walk` v1 接受（记录长期停滞风险）。见 §2.3。

@@ -26,30 +26,31 @@ This file provides guidance to CodeBuddy Code when working with code in this rep
 
 ## 项目是什么
 
-`anSMBwinHelper` 是 anSMB 生态中**独立的 Windows 侧网络适配层**，用于让 Windows 原生 SMB 客户端 / Explorer 访问运行在 Android 上、监听**非标准端口 4450** 的 `anSMBserver`。
+`anSMBwinHelper` 是 anSMB 生态中**独立的 Windows 侧网络适配层**，用于让 Windows 原生 SMB 客户端 / Explorer 访问运行在 Android 上、监听**非标准端口（默认 4450，可配置，不得写死）**的 `anSMBserver`。
 
 ```text
 Windows SMB Client
         │ TCP: <动态临时端口> → AndroidIP:445
         ▼
 anSMBwinHelper
-        │ 透明改写「目的端口」：AndroidIP:445 → AndroidIP:4450
-        │ （目的 IP 不变；不改 Windows 源端口）
+        │ 透明改写「目的端口」：AndroidIP:445 → AndroidIP:<AndroidPort>
+        │ （<AndroidPort> 可配置，默认 4450；目的 IP 不变；不改 Windows 源端口）
         ▼
-Android anSMBserver（真正监听 TCP 4450）
-        │ TCP 响应：AndroidIP:4450 → Windows 动态临时端口
+Android anSMBserver（真正监听该可配置端口）
+        │ TCP 响应：AndroidIP:<AndroidPort> → Windows 动态临时端口
         ▼
 anSMBwinHelper
-        │ 透明恢复「源端口」：4450 → 445
+        │ 透明恢复「源端口」：<AndroidPort> → 445
         ▼
 Windows SMB Client
 ```
 
-根因：Android 应用无法绑定 < 1024 的特权端口，所以 anSMBserver 用 4450；而 Windows 原生 SMB 客户端只走 445，UNC 路径也无法指定端口。**4450 不是为了避免与 Windows 445 冲突**，这是关键的因果方向，不要写反。
+根因：Android 应用无法绑定 < 1024 的特权端口，所以 anSMBserver 不能监听 445；而 Windows 原生 SMB 客户端只走 445，UNC 路径也无法指定端口。**端口可配不是为了避免与 Windows 445 冲突**，这是关键的因果方向，不要写反。
 
-**关键澄清（曾被误读，务必注意）**：445 与 4450 **都是 Android IP 上的目的端口**，其中 **4450 是 Android 真正监听的端口，445 不是**（Android 从不监听 445）。**Windows 侧不监听 445**，只有 SMB 客户端的动态临时源端口。本项目的正式术语是**透明 TCP 目的端口重定向**，**不是**"Windows 本机 445→4450 端口转发"；因此 `netsh interface portproxy` 与普通用户态 TCP proxy **不适用**。
+**关键澄清（曾被误读，务必注意）**：445 与 Android 实际监听端口**都在 Android IP 上**，其中 **Android 真正监听的是那个可配置端口（默认 4450），不是 445**（Android 从不监听 445）。**该端口不得写死为 4450**——anSMBserver 的监听端口可修改。**每条规则只有两项可配**：`Android IP`（规则集合内**唯一**）+ `Android SMB Port`；Windows 目的端口 **TCP 445** 与协议 **TCP** 是**全局固定项**。**同一个 Android IP 不得存在两条规则**（否则两条出站 filter 会争抢 `AndroidIP:445`）。**Windows 侧不监听 445**，只有 SMB 客户端的动态临时源端口。本项目的正式术语是**透明 TCP 目的端口重定向**，**不是**"Windows 本机 445→4450 端口转发"，也**不是**任意 `FROM→TO` 的通用 NAT；因此 `netsh interface portproxy` 与普通用户态 TCP proxy **不适用**。
+⛔ **不得**把 `Windows TCP 445` 单独当成一条规则的**目标**；规则的 Windows 侧匹配目标是**派生**的 `AndroidIP:445`。
 
-**项目边界（不得越界）**：本项目管理的是"445 → 4450 的网络适配"，它**不应**演变成 SMB Server、SMB Client、Windows 版 anSMBserver、通用端口转发工具，或自有 SMB 协议实现。
+**项目边界（不得越界）**：本项目管理的是"445 → Android 实际监听端口 的网络适配"，它**不应**演变成 SMB Server、SMB Client、Windows 版 anSMBserver、通用端口转发工具或通用 NAT，也不应变成自有 SMB 协议实现。
 
 ## 架构大图
 
@@ -68,8 +69,8 @@ WinDivert 是**底层技术组件**，项目本身是产品；不要让仓库变
 这些不能靠推理下结论，必须实验验证后再写入决策记录。其中部分已由 `decisions/002`、`research/001`、`research/002` 收敛：
 
 - **目的端口改写**：已确定为**只改目的端口**（目的 IP 不变）——见 `decisions/002`；但仍需实测 checksum 处理（含 **checksum offload / LSO**）。
-- **返回方向（Android → Windows）**：源端口 `4450 → 445` 还原；模型已定，仍需实测。
-- **是否需要 connection tracking**：**映射本身不需要**（Windows 源端口不变）；但无状态 reverse filter 存在**跨流误伤边界**（可能匹配来自 `AndroidIP:4450` 的其他直接连接），需在阶段 1 验证真实环境是否存在该冲突，**不提前引入状态**——见 `research/002` §21。
+- **返回方向（Android → Windows）**：源端口 `<AndroidPort> → 445` 还原；模型已定，仍需实测。
+- **是否需要 connection tracking**：**映射本身不需要**（Windows 源端口不变）；但无状态 reverse filter 存在**跨流误伤边界**（可能匹配来自 `AndroidIP:<AndroidPort>` 的其他直接连接），需在阶段 1 验证真实环境是否存在该冲突，**不提前引入状态**——见 `research/002` §21。
 - 多连接、长连接、正常/异常断开、重连下的行为；
 - 目标不可用时的降级行为；
 - 运行所需的 **Windows 权限**（普通用户 vs 管理员、驱动加载、UAC、退出清理）；
@@ -97,8 +98,10 @@ WinDivert 是**底层技术组件**，项目本身是产品；不要让仓库变
 6. **目录职责固定**：`local_dev/docs` 放开发文档（`decisions/`、`research/`，活计划为 `DEVELOPMENT_PLAN.md`），`docs/` 只放对外公开的正式文档，`src/` 只放已确认的生产代码。`third_party/`、`scripts/`、`assets/`、`tests/` **未到需要时不要提前创建**。
 7. **重要技术决策必须落盘**到 `local_dev/docs/decisions/`，格式为：背景 / 问题 / 候选方案 / 验证 / 结果 / 决策 / 影响。不要只留在对话里。
 8. **不要过度工程化**：阶段 1/2 优先验证核心问题。**没有实际验证证明必要，不得提前引入**通用 NAT、connection tracking、batching、overlapped I/O、多线程、复杂配置系统、GUI 框架、服务化。
-9. **复用优先，但遵守 License**：优先复用成熟开源组件，不重复造轮子；**参考实现 ≠ 可复制代码**。`detour`（GPLv3）是**参考实现，不是代码依赖**，不得复制其源码。本项目 License 尚未确定。
+9. **复用优先，遵守 License；项目已定 GPLv3**：优先复用成熟开源组件，不重复造轮子。`detour`（GPLv3）是**允许复用和修改的上游代码基础**，不要求保留其通用 NAT/UDP/多规则能力。**本项目采用 GPLv3**；第三方组件（`imgk/divert-go`、`lxn/walk`、WinDivert 等）的许可与随包要求须正确处理，清单见 `DEVELOPMENT_PLAN.md` §9。
 10. **测试以风险覆盖为目的**，不为了阶段流程重复执行完全相同的测试；已有结果可跨阶段复用。
+11. **GUI 先定信息架构再动代码**：v1 GUI 结构见 `local_dev/docs/decisions/003-gui-v1-information-architecture.md`；**未确认前不要删除 `cmd/detour-gui` 的现有代码**（托盘/规则表/ruleTableModel/Add·Edit·Delete/多规则持久化/engine 状态机等基础设施**都要保留复用**）。
+12. **多目标规则（v1 必须）**：一条规则 = `Android IP` + `Android SMB Port`（+ 稳定 ID）；**Android IP 在规则集合内唯一**，重复须在配置层拒绝。**多规则 ≠ 通用 NAT** —— 不得引入任意 FROM/TO、UDP、TCP/UDP 选择、代理。网络模型 → 规则模型 → 配置模型 → GUI 模型 → filter 模型 五层必须一致（核对表见 `decisions/003` §0）。
 
 ### Agent 权限分级（`AGENTS.md` §13）
 
