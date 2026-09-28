@@ -1,0 +1,5 @@
+# Local development workspace (never committed)
+/local_dev/
+
+# macOS
+.DS_Store
