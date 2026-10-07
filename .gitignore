@@ -3,3 +3,8 @@
 
 # macOS
 .DS_Store
+
+# Build artifacts (Go)
+/src/dist/
+*.exe
+*.test

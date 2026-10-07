@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  anSMBwinRedirector 的 application manifest。
+
+  ⚠️ 这是**必需**的，不是可选项：walk 的 `WidgetBase.init` 会为每个控件创建 ToolTip，
+  而没有 Common-Controls v6 清单时（在 Windows 实机上实测）窗口创建会直接失败
+  （`TTM_ADDTOOL failed`）。外部 `*.exe.manifest` 文件**不生效**，必须**嵌入**。
+
+  ⛔ 提权方式（`requestedExecutionLevel`）属于 decisions/009 §17 的 2.7 packaging 范围；
+      v1 现阶段保持 `asInvoker`，管理员权限在启动序列 P1 运行时检查（decisions/007 §4.8）。
+     ⚠️ 2.7 需要重新评估是否改为 `requireAdministrator`。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="anSMBwinRedirector" version="0.2.0.0" processorArchitecture="amd64"/>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
+                        version="6.0.0.0" processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+    </windowsSettings>
+  </application>
+</assembly>

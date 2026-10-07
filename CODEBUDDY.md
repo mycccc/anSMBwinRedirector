@@ -17,29 +17,38 @@ This file provides guidance to CodeBuddy Code when working with code in this rep
 
 ## 当前仓库状态
 
-> 这是一个**尚未开始编码**的绿地仓库，不要假设存在构建系统或测试体系。
+> **阶段 1（技术验证）PASS → 阶段 2（最小实现）已在 Windows 实机验证 → 2.7 Packaging 已 APPROVED。**
+> 正式源码在 `src/`；**产品入口 = GUI / 托盘 `cmd/ansmbwinredirector`**。
 
-- 目前**没有任何源代码、构建配置、测试或 CI**。根目录只有 `AGENTS.md`、`CODEBUDDY.md`、`README.md`、`.gitignore` 与 `local_dev/`。
-- **仓库已 `git init`（分支 `main`），但尚无任何 commit**；`local_dev/` 由 `.gitignore` 整体忽略。
-- 无构建、无 lint、无测试命令可用。不要虚构这类命令。
-- 因此不存在"运行单个测试"的方法——在产生正式工具链之前，验证手段是 `local_dev/` 内的实验程序与手工测试。
+- 根目录：`AGENTS.md`、`CODEBUDDY.md`、`README.md`、`LICENSE`、`THIRD_PARTY_NOTICES.md`、`scripts/`、`.gitignore`、`src/`、`local_dev/`（最后一项被 `.gitignore` 整体忽略，**永不提交**）。
+- `src/`（`module ansmbwinhelper`）：
+  - `cmd/ansmbwinredirector/` — **产品入口**（GUI / 托盘）+ `anSMBwinRedirector.manifest` + `rsrc_amd64.syso`
+  - `cmd/devconsole/` — **非产品**的控制台集成入口（原第一轮入口）
+  - `internal/{app,controller,runtime,winvert,config,model,snapshot,diag,gui}`
+- **可用命令（在 `src/` 下）**：`go test ./...`、`gofmt -l ./cmd ./internal`、`go vet ./...`；
+  Windows 交叉编译：`GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/ansmbwinredirector`。
+- **发布包**：`scripts/build-release.sh <version>` → `src/dist/release/`（6 个文件；`src/dist/` 被 `.gitignore` 忽略）。
+- ⚠️ **manifest 是必需的**：GUI 框架 `lxn/walk` 需要 Common-Controls v6 清单，缺失会导致窗口**完全建不出来**；
+  它以内嵌资源 `cmd/ansmbwinredirector/rsrc_amd64.syso` 形式提供，由 `go tool rsrc`（版本锁在 `go.mod` 的 `tool` 指令）**可复现地**生成。
+- Go 工具链：Mac 上在 `~/sdk/go`（未改 shell profile，用 `export PATH="$HOME/sdk/go/bin:$PATH"`）。
+- 当前状态与下一步见 `local_dev/docs/DEVELOPMENT_PLAN.md`。
 
 ## 项目是什么
 
-`anSMBwinHelper` 是 anSMB 生态中**独立的 Windows 侧网络适配层**，用于让 Windows 原生 SMB 客户端 / Explorer 访问运行在 Android 上、监听**非标准端口（默认 4450，可配置，不得写死）**的 `anSMBserver`。
+`anSMBwinRedirector` 是 anSMB 生态中**独立的 Windows 侧网络适配层**，用于让 Windows 原生 SMB 客户端 / Explorer 访问运行在 Android 上、监听**非标准端口（默认 4450，可配置，不得写死）**的 `anSMBserver`。
 
 ```text
 Windows SMB Client
         │ TCP: <动态临时端口> → AndroidIP:445
         ▼
-anSMBwinHelper
+anSMBwinRedirector
         │ 透明改写「目的端口」：AndroidIP:445 → AndroidIP:<AndroidPort>
         │ （<AndroidPort> 可配置，默认 4450；目的 IP 不变；不改 Windows 源端口）
         ▼
 Android anSMBserver（真正监听该可配置端口）
         │ TCP 响应：AndroidIP:<AndroidPort> → Windows 动态临时端口
         ▼
-anSMBwinHelper
+anSMBwinRedirector
         │ 透明恢复「源端口」：<AndroidPort> → 445
         ▼
 Windows SMB Client
@@ -57,24 +66,23 @@ Windows SMB Client
 `AGENTS.md` §6 与 brief §6 把架构分成两层，这是理解本项目的关键：
 
 ```text
-anSMBwinHelper
+anSMBwinRedirector
 ├── 产品层       配置 / 目标管理 / Start-Stop / 状态 / 日志
 └── 网络实现层   WinDivert（数据包拦截与重写）
 ```
 
 WinDivert 是**底层技术组件**，项目本身是产品；不要让仓库变成一个 WinDivert demo。
 
-### 阶段 1 要回答的核心问题
+### 阶段 1 已验证的核心问题（已完成，2026-09-29）
 
-这些不能靠推理下结论，必须实验验证后再写入决策记录。其中部分已由 `decisions/002`、`research/001`、`research/002` 收敛：
+阶段 1（`local_dev/phases/p0/`，含 P0/P0.1/P0.1-C）的实机结论见 `local_dev/phases/p0/RESULT.md` 与 `decisions/004-v1-architecture-baseline.md`：
 
-- **目的端口改写**：已确定为**只改目的端口**（目的 IP 不变）——见 `decisions/002`；但仍需实测 checksum 处理（含 **checksum offload / LSO**）。
-- **返回方向（Android → Windows）**：源端口 `<AndroidPort> → 445` 还原；模型已定，仍需实测。
-- **是否需要 connection tracking**：**映射本身不需要**（Windows 源端口不变）；但无状态 reverse filter 存在**跨流误伤边界**（可能匹配来自 `AndroidIP:<AndroidPort>` 的其他直接连接），需在阶段 1 验证真实环境是否存在该冲突，**不提前引入状态**——见 `research/002` §21。
-- 多连接、长连接、正常/异常断开、重连下的行为；
-- 目标不可用时的降级行为；
-- 运行所需的 **Windows 权限**（普通用户 vs 管理员、驱动加载、UAC、退出清理）；
-- **WinDivert 会自动安装驱动**：需确认常驻/按需、卸载条件与系统残留——见 `research/002` §15；
+- **目的端口改写**：**只改目的端口**（目的 IP 不变）——`decisions/002`；checksum offload/LSO 实测**未造成问题**（判据是握手/保持/SMB 全部成功，而非抓包里的 checksum 字段）。
+- **返回方向（Android → Windows）**：源端口 `<AndroidPort> → 445` 还原，实测成立。
+- **是否需要 connection tracking**：映射本身**不需要**；但**无状态反滤波存在跨流误伤**（实测复现：直连 `AndroidIP:<AndroidPort>` 的返回包被误改成 445）。**已用最小 FlowTable（仅记录 OUT 建立的映射，IN 未命中即原样放行）修复**——此为**最小必要状态**，仍**不是**通用 NAT / connection tracking。
+- 多连接、混合流、正常/异常断开、重连、停止/重启基线——均已实测。
+- 运行所需 **Windows 权限**：需管理员（WinDivert 驱动加载）。
+- **WinDivert 驱动**：按需安装、不随进程退出卸载（`P0.1-C`）；显式清理需带两项安全检查（见 `AGENTS.md` §2.2）。
 - WinDivert 的**许可证与再分发**要求（版本 2.2.2，见下）。
 
 ### 参考材料
@@ -84,7 +92,7 @@ WinDivert 是**底层技术组件**，项目本身是产品；不要让仓库变
 - `include/windivert.h`、`doc/WinDivert.html`、`LICENSE`、`CHANGELOG`
 - `x64/`（及 `x86/`）含 `WinDivert.dll`、`WinDivert.lib`、`WinDivert64.sys` 与示例工具 `netdump.exe`、`flowtrack.exe`、`streamdump.exe`、`windivertctl.exe` 等
 
-`local_dev/refer/detour/` 是 `LeeJeKyun/detour` 的源码副本（**GPLv3**，仅作**参考实现**，**不作为代码依赖、不得复制**）。分析结论见 `local_dev/docs/research/002-detour-analysis.md`。
+`local_dev/refer/detour/` 是 `LeeJeKyun/detour` 的源码副本（**GPLv3**）——它是本项目的 **GPLv3 上游代码基础 / 重要参考实现**，**允许在遵守 GPLv3 及第三方许可要求的前提下复用、修改、删减**；**不要求**保留其通用 NAT / UDP / 多规则能力。源码分析 + release 实机取证见 `local_dev/docs/research/002-detour-analysis.md`（**不要**修改该参考副本）。
 
 ## 硬性约束（来自 `AGENTS.md`）
 
@@ -93,14 +101,15 @@ WinDivert 是**底层技术组件**，项目本身是产品；不要让仓库变
 1. **阶段门**：项目只有四个阶段——`阶段 1 技术验证 → 阶段 2 最小实现 → 阶段 3 实际使用验证 → 阶段 4 发布整理`。**没有通过技术验证，不进入正式实现**；失败时不得靠堆代码绕过可行性问题。不要人为拆分子阶段（P0.1/P0.2…）。
 2. **阶段 1 禁止向 `src/` 写正式代码**。实验代码必须放 `local_dev/phases/p0/`（该目录即阶段 1）或 `local_dev/tests/`、`local_dev/tools/`。
 3. **`local_dev/` 是开发沙盒，永不提交 Git**（`.gitignore` 应为 `/local_dev/`）。实验失败也要保留并记录原因，不要为了"干净"删除。
-4. **技术栈不锁定**：语言、UI/网络框架、具体架构在验证前不得宣布"项目采用 XXX"。WinDivert 目前是**强候选但未正式选定**，不是已定架构。
+4. **技术栈：语言与网络机制均已确定**：实现语言 = **Go**、项目许可 = **GPLv3**、GUI 库 v1 = **`lxn/walk`**、**网络拦截机制 = WinDivert 2.2.2-A**（2026-09-29 经阶段 1 实机 PoC 验证后正式选定，见 `decisions/004-v1-architecture-baseline.md`）。**v1 架构细节仍未定**。C/C++、C#、Rust 已评估并**未采用**，不要重新引入。除已定项外不得宣布"项目采用 XXX"。
 5. **实验成功 ≠ 正式实现**。`local_dev/phases/p0/` 的代码需经过 验证 → 总结 → 技术决策 → 重新设计，才可进入 `src/`；**禁止直接复制**。
 6. **目录职责固定**：`local_dev/docs` 放开发文档（`decisions/`、`research/`，活计划为 `DEVELOPMENT_PLAN.md`），`docs/` 只放对外公开的正式文档，`src/` 只放已确认的生产代码。`third_party/`、`scripts/`、`assets/`、`tests/` **未到需要时不要提前创建**。
 7. **重要技术决策必须落盘**到 `local_dev/docs/decisions/`，格式为：背景 / 问题 / 候选方案 / 验证 / 结果 / 决策 / 影响。不要只留在对话里。
 8. **不要过度工程化**：阶段 1/2 优先验证核心问题。**没有实际验证证明必要，不得提前引入**通用 NAT、connection tracking、batching、overlapped I/O、多线程、复杂配置系统、GUI 框架、服务化。
 9. **复用优先，遵守 License；项目已定 GPLv3**：优先复用成熟开源组件，不重复造轮子。`detour`（GPLv3）是**允许复用和修改的上游代码基础**，不要求保留其通用 NAT/UDP/多规则能力。**本项目采用 GPLv3**；第三方组件（`imgk/divert-go`、`lxn/walk`、WinDivert 等）的许可与随包要求须正确处理，清单见 `DEVELOPMENT_PLAN.md` §9。
 10. **测试以风险覆盖为目的**，不为了阶段流程重复执行完全相同的测试；已有结果可跨阶段复用。
-11. **GUI 先定信息架构再动代码**：v1 GUI 结构见 `local_dev/docs/decisions/003-gui-v1-information-architecture.md`；**未确认前不要删除 `cmd/detour-gui` 的现有代码**（托盘/规则表/ruleTableModel/Add·Edit·Delete/多规则持久化/engine 状态机等基础设施**都要保留复用**）。
+11. **GUI 先定信息架构再动代码**：v1 GUI 结构见 `decisions/003-gui-v1-information-architecture.md` 与 `decisions/008-v1-gui-interaction-contract.md`；**已实现的 GUI 在 `src/internal/gui` + `cmd/ansmbwinredirector`**，属已批准范围，**不要擅自重构或删除**（托盘 / 规则表 / Add·Edit·Delete / 多规则持久化 / 状态机等基础设施保留复用）。
+    > ⚠️ 历史注（2026-10-07 收口审计）：本条原写"不要删除 `cmd/detour-gui` 的现有代码"——那是 **detour 参考实现**里的路径；本项目**并未复制 detour 的 GUI**，该路径在本仓库**不存在**。
 12. **多目标规则（v1 必须）**：一条规则 = `Android IP` + `Android SMB Port`（+ 稳定 ID）；**Android IP 在规则集合内唯一**，重复须在配置层拒绝。**多规则 ≠ 通用 NAT** —— 不得引入任意 FROM/TO、UDP、TCP/UDP 选择、代理。网络模型 → 规则模型 → 配置模型 → GUI 模型 → filter 模型 五层必须一致（核对表见 `decisions/003` §0）。
 
 ### Agent 权限分级（`AGENTS.md` §13）
@@ -119,6 +128,8 @@ WinDivert 是**底层技术组件**，项目本身是产品；不要让仓库变
 
 建议由用户确认后再处理，不要自行"修正"：
 
-- **`LICENSE` 待确认**：项目许可证尚未确定，不得自行选择 MIT、Apache-2.0 等。在确认前不要创建 `LICENSE` 文件。
-- **Git 提交策略待确认**：仓库已 `git init` 但尚无首次 commit，提交策略未定。
+- **Git 提交策略未定（Release Gate 前的唯一开口项）**：仓库已有 2 个 commit（`f51cead`、`1c63552`），
+  但 **`src/`、`LICENSE`、`THIRD_PARTY_NOTICES.md`、`scripts/` 仍是未跟踪/未提交状态** ——
+  正式发布前需要用户裁定提交策略与发布提交的粒度。
+- **许可证已定（2026-10-07）**：**GPL-3.0-only**（不含 "or any later version"）；`LICENSE` 为官方 GPLv3 全文，已随发布包分发。
 - `AGENTS.md` 与本文件并存：两者都描述 Agent 工作规则。本文件刻意保持精简并指向 `AGENTS.md` 以避免内容分叉，**修改规则时请更新 `AGENTS.md`，不要只改这里**。
