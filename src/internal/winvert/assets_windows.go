@@ -10,6 +10,8 @@
 package winvert
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,9 +20,6 @@ import (
 
 	"ansmbwinhelper/internal/diag"
 )
-
-// prep 保证 Prepare 的**成功**只做一次；**失败不缓存**（见 assets_common.go 的 prepareState）。
-var prep prepareState
 
 // WinDivertDir 返回 WinDivert 运行时文件**应当**所在的目录 —— 可执行文件所在目录。
 //
@@ -104,4 +103,36 @@ func DescribeWinDivertFiles() string {
 		return fmt.Sprintf("(不可用: %v)", err)
 	}
 	return d
+}
+
+// RuntimeFileInfos 返回两个运行时文件的**逐项校验结果**（decisions/011 §2.7）。
+//
+// ⚠️ **只读**：只读取与比对，⛔ 不修改任何文件。
+func RuntimeFileInfos() []diag.RuntimeFile {
+	dir, derr := WinDivertDir()
+	out := make([]diag.RuntimeFile, 0, 2)
+	for _, name := range []string{DLLName, SysName} {
+		f := diag.RuntimeFile{Name: name, Expected: expectedHash(name)}
+		if derr != nil {
+			f.Err = derr.Error()
+			out = append(out, f)
+			continue
+		}
+		f.Path = filepath.Join(dir, name)
+		data, err := os.ReadFile(f.Path)
+		if err != nil {
+			f.Err = err.Error()
+			out = append(out, f)
+			continue
+		}
+		sum := sha256.Sum256(data)
+		f.Actual = hex.EncodeToString(sum[:])
+		f.OK = f.Actual == f.Expected
+		// 文件版本（静态元数据；读不到就留空 ⇒ 上层显示"未知"，⛔ 不拿期望值冒充）。
+		if v, verr := FileVersion(f.Path); verr == nil {
+			f.Version = v
+		}
+		out = append(out, f)
+	}
+	return out
 }

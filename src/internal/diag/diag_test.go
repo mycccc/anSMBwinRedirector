@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"ansmbwinhelper/internal/i18n"
 )
 
 func TestAllCodesAreInClosedSet(t *testing.T) {
@@ -15,7 +17,7 @@ func TestAllCodesAreInClosedSet(t *testing.T) {
 			t.Errorf("%s 不在码表内", c)
 		}
 		m := Meta(c)
-		if m.Summary == "" {
+		if m.Summary() == "" {
 			t.Errorf("%s 缺少摘要", c)
 		}
 		if m.Category == "" || m.Scope == "" {
@@ -147,7 +149,7 @@ func TestRingIsBoundedAndNewestFirst(t *testing.T) {
 
 func TestFormatDetailsHasFixedSections(t *testing.T) {
 	d := Details{
-		Version:   VersionInfo{Version: "0.1.0", GoVersion: "go1.27.1", Platform: "windows/amd64", Release: "release"},
+		Version:   VersionInfo{Version: "1.0", GoVersion: "go1.27.1", Platform: "windows/amd64", Release: "release"},
 		OS:        "Windows 10 x64",
 		Time:      time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC),
 		Mode:      "运行中",
@@ -156,7 +158,7 @@ func TestFormatDetailsHasFixedSections(t *testing.T) {
 		Errors:    []ErrorInfo{New(CodeDriverBlocked, SrcStart, "被安全软件阻止", "t1")},
 		Config:    ConfigInfo{Path: `C:\x\config.json`, State: "Loaded", SchemaVersion: 1, TargetCount: 2},
 		WinDivert: WinDivertInfo{Available: true, ServiceExists: true, ImagePathIsOurs: true,
-			DriverState: "Loaded", DriverVersion: "2.2.2", RuntimeFilesOK: true},
+			DriverState: "Loaded", DriverRuntimeVersion: "2.2.2", RuntimeFilesOK: true},
 		Targets: []TargetInfo{{ID: "t1", Endpoint: "192.168.1.100:4450", Runtime: "Running", Reachability: "可达"}},
 		Recent:  []Entry{{Level: LevelWarn, Time: time.Now(), Source: SrcStart, Message: "目标 t1 启动失败"}},
 	}
@@ -168,7 +170,8 @@ func TestFormatDetailsHasFixedSections(t *testing.T) {
 		"DRIVER_BLOCKED", "驱动 / 全局（影响 1 个目标：t1）",
 		"192.168.1.100:4450", "===== 完 =====",
 		NoteText(NoteReflectConsumersUnprovable),
-		"本程序不执行任何驱动卸载操作",
+		// ⚠️ 用 i18n 取值而不是写死文案：这条断言曾因文案更新（服务生命周期由本程序负责）而失败。
+		i18n.T("diag.no_uninstall"),
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("诊断详情缺少 %q", want)

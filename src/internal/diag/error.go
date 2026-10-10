@@ -37,7 +37,7 @@ func New(code Code, src Source, detail string, targetID string) ErrorInfo {
 		Code:       code,
 		Category:   m.Category,
 		Scope:      m.Scope,
-		Summary:    m.Summary,
+		Summary:    m.Summary(),
 		Detail:     detail,
 		Source:     src,
 		TargetID:   targetID,

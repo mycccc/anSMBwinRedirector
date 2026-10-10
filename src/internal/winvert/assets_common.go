@@ -33,6 +33,12 @@ type prepareState struct {
 	done bool
 }
 
+// prep 保证 Prepare 的**成功**只做一次；**失败不缓存**（见下方 prepareState）。
+//
+// ⚠️ 放在本文件（跨平台）而不是 assets_windows.go：`InvalidatePrepare` 需要在
+// 非 Windows 平台也可编译（供 stub 与单测使用）。
+var prep prepareState
+
 // do 在尚未成功时执行 fn：失败**不缓存**（下次会真正重试），成功后不再执行。
 func (p *prepareState) do(fn func() error) error {
 	p.mu.Lock()
@@ -46,6 +52,20 @@ func (p *prepareState) do(fn func() error) error {
 	p.done = true
 	return nil
 }
+
+// reset 丢弃"已成功"标记（供 Repair 使用：用户可能刚替换了同目录的运行时文件）。
+func (p *prepareState) reset() {
+	p.mu.Lock()
+	p.done = false
+	p.mu.Unlock()
+}
+
+// InvalidatePrepare 使下一次 `Prepare()` 重新校验运行时文件。
+//
+// ⚠️ 为什么需要它（decisions/011 §2.7 的 `Repair`）：`Prepare()` 对**成功**是幂等的，
+// 而 Repair 的意义正是"用户替换/补齐了 WinDivert 文件后重新校验并重新接管" ——
+// 若不复位成功标记，Repair 之后的下一次 Start 仍会用旧的校验结论。
+func InvalidatePrepare() { prep.reset() }
 
 const (
 	// DLLName / SysName 是 WinDivert 运行时文件名（decisions/010 §B.1）。

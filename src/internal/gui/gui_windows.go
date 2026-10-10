@@ -13,7 +13,6 @@
 package gui
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -46,9 +45,14 @@ type gui struct {
 	actState, actStart, actStop, actApply *walk.Action
 
 	// 操作区
-	btnStart, btnStop, btnApply                     *walk.PushButton
-	btnAdd, btnEdit, btnDel                         *walk.PushButton
-	btnTest, btnRetry, btnInspect, btnCopy, btnExit *walk.PushButton
+	btnStart, btnStop, btnApply         *walk.PushButton
+	btnAdd, btnEdit, btnDel, btnConnect *walk.PushButton
+	btnDebug, btnCopy, btnExit          *walk.PushButton
+
+	// 表格右键菜单（decisions/012 §3.4：Connect / Edit / Delete，Connect 为第一项）
+	actCtxConnect, actCtxEdit, actCtxDelete *walk.Action
+	// dialogOpen 防止双击被处理两次（ItemActivated 的重入保护）。
+	dialogOpen bool
 
 	// 「配置不可用」专用面板（decisions/008 §14）
 	pnlUnavailable *walk.Composite
@@ -86,7 +90,7 @@ func Run(a *app.App) int {
 
 	if err := g.build(); err != nil {
 		// 构建失败时窗口还不存在 ⇒ 用 nil owner 的 MessageBox。
-		walk.MsgBox(nil, "anSMBwinRedirector 启动失败", err.Error(), walk.MsgBoxIconError)
+		walk.MsgBox(nil, T("app.start_failed_title"), err.Error(), walk.MsgBoxIconError)
 		return 1
 	}
 
@@ -121,9 +125,9 @@ func (g *gui) build() error {
 
 	decl := MainWindow{
 		AssignTo: &g.mw,
-		Title:    "anSMBwinRedirector",
+		Title:    T("app.title"),
 		MinSize:  Size{Width: 880, Height: 560},
-		Size:     Size{Width: 1000, Height: 660},
+		Size:     Size{Width: 1020, Height: 660},
 		Layout:   VBox{},
 		Children: []Widget{
 			// ① 状态条：全局模式 + 聚合（decisions/008 §9）
@@ -131,22 +135,22 @@ func (g *gui) build() error {
 			// 全局错误横幅（decisions/008 §13：全局类**归并**展示）
 			Label{AssignTo: &g.lblBanner, Text: " "},
 
-			// ② 操作区（decisions/008 §7）
+			// ② 操作区（decisions/008 §7；2026-10-08 修订：删「连接测试」「重试启动」，
+			//    顺序 = 启停 → 增删改 → 应用更改 → 连接）
 			Composite{
 				Layout: HBox{},
 				Children: []Widget{
-					PushButton{AssignTo: &g.btnStart, Text: "启动", OnClicked: func() { g.onStart() }},
-					PushButton{AssignTo: &g.btnStop, Text: "停止", OnClicked: func() { g.onStop() }},
-					PushButton{AssignTo: &g.btnApply, Text: "应用更改", OnClicked: func() { g.onApply() }},
+					PushButton{AssignTo: &g.btnStart, Text: T("main.start"), OnClicked: func() { g.onStart() }},
+					PushButton{AssignTo: &g.btnStop, Text: T("main.stop"), OnClicked: func() { g.onStop() }},
 					VSeparator{},
-					PushButton{AssignTo: &g.btnAdd, Text: "添加", OnClicked: func() { g.onAdd() }},
-					PushButton{AssignTo: &g.btnEdit, Text: "编辑", OnClicked: func() { g.onEdit() }},
-					PushButton{AssignTo: &g.btnDel, Text: "删除", OnClicked: func() { g.onDel() }},
-					VSeparator{},
-					PushButton{AssignTo: &g.btnTest, Text: "连接测试", OnClicked: func() { g.onTest() }},
-					PushButton{AssignTo: &g.btnRetry, Text: "重试启动", OnClicked: func() { g.onRetry() }},
+					PushButton{AssignTo: &g.btnAdd, Text: T("main.add"), OnClicked: func() { g.onAdd() }},
+					PushButton{AssignTo: &g.btnEdit, Text: T("main.edit"), OnClicked: func() { g.onEdit() }},
+					PushButton{AssignTo: &g.btnDel, Text: T("main.delete"), OnClicked: func() { g.onDel() }},
+					// 「应用更改」移到增/改/删之后（与"改列表 → 确认 → 应用"的心智一致）。
+					PushButton{AssignTo: &g.btnApply, Text: T("main.apply"), OnClicked: func() { g.onApply() }},
+					PushButton{AssignTo: &g.btnConnect, Text: T("main.connect"), OnClicked: func() { g.onConnect() }},
 					HSpacer{},
-					PushButton{AssignTo: &g.btnInspect, Text: "检查 WinDivert（只读）", OnClicked: func() { g.onInspect() }},
+					PushButton{AssignTo: &g.btnDebug, Text: T("main.debug"), OnClicked: func() { g.onDebug() }},
 				},
 			},
 
@@ -156,14 +160,18 @@ func (g *gui) build() error {
 				Layout:   HBox{},
 				Visible:  false,
 				Children: []Widget{
-					Label{Text: "⛔ 配置不可用 —— 修复前不会启动重定向，也不会覆盖该文件。"},
+					Label{Text: T("banner.config_unavailable")},
 					HSpacer{},
-					PushButton{AssignTo: &g.btnCopyPath, Text: "复制配置路径", OnClicked: func() { g.onCopyPath() }},
-					PushButton{AssignTo: &g.btnQuarantine, Text: "用空配置重新开始", OnClicked: func() { g.onQuarantine() }},
+					PushButton{AssignTo: &g.btnCopyPath, Text: T("btn.copy_config_path"), OnClicked: func() { g.onCopyPath() }},
+					PushButton{AssignTo: &g.btnQuarantine, Text: T("main.restart_empty"), OnClicked: func() { g.onQuarantine() }},
 				},
 			},
 
 			// ③ 目标表格（decisions/008 §5；`运行态` 与 `可达性` 是两列，二者正交）
+			//
+			// ⚠️ 交互（decisions/012 §3.4 / 008 §5）：
+			//   单击 = 选中（无副作用）；**双击 = 编辑**；**右键 = 上下文菜单**（Connect/Edit/Delete）。
+			//   右键**先**把命中行设为当前行（见 onTableMouseUp），因此菜单动作作用于**命中的那一行**。
 			TableView{
 				AssignTo:              &g.tv,
 				AlternatingRowBG:      true,
@@ -172,10 +180,17 @@ func (g *gui) build() error {
 				Model:                 g.mdl,
 				Columns:               columns(),
 				OnCurrentIndexChanged: func() { g.onSelectionChanged() },
+				OnItemActivated:       func() { g.onEdit() },
+				OnMouseUp:             func(x, y int, button walk.MouseButton) { g.onTableMouseUp(x, y, button) },
+				ContextMenuItems: []MenuItem{
+					Action{AssignTo: &g.actCtxConnect, Text: T("main.connect"), OnTriggered: func() { g.onConnect() }},
+					Action{AssignTo: &g.actCtxEdit, Text: T("main.edit"), OnTriggered: func() { g.onEdit() }},
+					Action{AssignTo: &g.actCtxDelete, Text: T("main.delete"), OnTriggered: func() { g.onDel() }},
+				},
 			},
 
 			// ⑤ 详情条（decisions/008 §13：错误可见性优先，避免"弹窗地狱"）
-			Label{Text: "详情（选中行 / 全局）："},
+			Label{Text: T("detail.header")},
 			TextEdit{AssignTo: &g.teDetails, ReadOnly: true, VScroll: true, MinSize: Size{Height: 130}},
 
 			// ⑥ 底部：配置与构建信息
@@ -184,8 +199,8 @@ func (g *gui) build() error {
 				Children: []Widget{
 					Label{AssignTo: &g.lblConfig, Text: ""},
 					HSpacer{},
-					PushButton{AssignTo: &g.btnCopy, Text: "复制详情", OnClicked: func() { g.onCopy() }},
-					PushButton{AssignTo: &g.btnExit, Text: "退出", OnClicked: func() { g.onExit() }},
+					PushButton{AssignTo: &g.btnCopy, Text: T("btn.copy_details"), OnClicked: func() { g.onCopy() }},
+					PushButton{AssignTo: &g.btnExit, Text: T("btn.exit"), OnClicked: func() { g.onExit() }},
 				},
 			},
 		},
@@ -241,23 +256,23 @@ func (g *gui) buildTray() error {
 	_ = g.actState.SetEnabled(false)
 
 	g.actStart = walk.NewAction()
-	_ = g.actStart.SetText("启动")
+	_ = g.actStart.SetText(T("main.start"))
 	g.actStart.Triggered().Attach(func() { g.onStart() })
 
 	g.actStop = walk.NewAction()
-	_ = g.actStop.SetText("停止")
+	_ = g.actStop.SetText(T("main.stop"))
 	g.actStop.Triggered().Attach(func() { g.onStop() })
 
 	g.actApply = walk.NewAction()
-	_ = g.actApply.SetText("应用更改")
+	_ = g.actApply.SetText(T("main.apply"))
 	g.actApply.Triggered().Attach(func() { g.onApply() })
 
 	open := walk.NewAction()
-	_ = open.SetText("打开主窗口(&O)")
+	_ = open.SetText(T("tray.open_main"))
 	open.Triggered().Attach(func() { g.showWindow() })
 
 	exit := walk.NewAction()
-	_ = exit.SetText("退出(&X)")
+	_ = exit.SetText(T("tray.exit"))
 	exit.Triggered().Attach(func() { g.onExit() })
 
 	for _, a := range []*walk.Action{
@@ -325,12 +340,28 @@ func sameTargets(a, b []model.Target) bool {
 func (g *gui) modeText(s snapshot.Snapshot) string {
 	out := "● " + s.StatusLine()
 	if s.Global.Operation != snapshot.OpNone {
-		out += "   ▸ 正在执行: " + string(s.Global.Operation)
+		out += T("status.op_prefix") + operationText(s.Global.Operation)
 	}
 	if g.draft.hasUnsaved() {
-		out += "   ⚠ 有未保存更改"
+		out += T("status.unsaved_suffix")
 	}
 	return out
+}
+
+// operationText 把**内部** `Operation` 标识映射为用户可见文案（decisions/013 §6.2）。
+//
+// ⚠️ 分层（Gate 2026-10-09 裁定）：
+//   - 内部标识（`Apply` / `Debug` / …）**保持不变**：程序逻辑、日志、错误关联、
+//     以及「复制详情」的「当前操作」行仍用稳定标识（②诊断数据层）；
+//   - **只有状态栏**经本函数换成 `应用中` / `调试中` / …（①用户可见文案层）。
+//
+// 缺 key ⇒ 退回内部标识（可见但可诊断，`T()` 会记 Issue）。
+func operationText(op snapshot.Operation) string {
+	key := "op." + strings.ToLower(string(op))
+	if t := T(key); t != key {
+		return t
+	}
+	return string(op)
 }
 
 // bannerText 归并**全局范围**的错误（decisions/009 §3：Target 级**不得**聚合到全局）。
@@ -345,7 +376,7 @@ func (g *gui) bannerText(s snapshot.Snapshot) (string, bool) {
 			p += " — " + e.Detail
 		}
 		if len(e.AffectedTargetIDs) > 0 {
-			p += fmt.Sprintf("（影响 %d 个目标）", len(e.AffectedTargetIDs))
+			p += fmt.Sprintf(T("status.affects_targets"), len(e.AffectedTargetIDs))
 		}
 		parts = append(parts, p)
 	}
@@ -356,7 +387,7 @@ func (g *gui) bannerText(s snapshot.Snapshot) (string, bool) {
 }
 
 func (g *gui) configText(s snapshot.Snapshot) string {
-	return fmt.Sprintf("配置: %s  ·  状态=%s  ·  schema=%d  ·  目标=%d  ·  备份=%v",
+	return fmt.Sprintf(T("detail.config_line"),
 		s.Config.Path, s.Config.State, s.Config.SchemaVersion, s.Config.TargetCount, s.Config.BackupExists)
 }
 
@@ -365,43 +396,43 @@ func (g *gui) renderDetails() {
 	var b strings.Builder
 
 	if g.snap.Global.Mode == snapshot.ModeConfigUnavailable {
-		b.WriteString("⛔ 配置不可用（在修复前不会启动重定向，也不会覆盖该文件）\r\n\r\n")
-		b.WriteString("路径: " + g.snap.Config.Path + "\r\n\r\n")
+		b.WriteString(T("detail.config_unavailable_header"))
+		b.WriteString(T("detail.path_label") + g.snap.Config.Path + "\r\n\r\n")
 		if len(g.snap.Config.Violations) > 0 {
-			b.WriteString("问题:\r\n")
+			b.WriteString(T("detail.problem_label"))
 			for _, v := range g.snap.Config.Violations {
 				b.WriteString("  · " + v + "\r\n")
 			}
 		} else {
-			b.WriteString("问题: （详见下方最近事件）\r\n")
+			b.WriteString(T("detail.problem_see_events"))
 		}
 		// ⚠️ 处置文案必须与**实际提供的动作**一致：schema_version 过新时
 		// 不提供动作②（decisions/006 §6.10），此时不能再写"或 ② ..."。
 		if g.ctl.ConfigCode() == diag.CodeConfigSchemaUnsupported {
-			b.WriteString("\r\n处置: ① 复制路径后人工修复该文件。\r\n" +
-				"      （该文件的 schema_version 高于本程序支持的版本，因此**不提供**\"用空配置重新开始\"；" +
-				"请升级程序，或手工处理该文件。）\r\n")
+			b.WriteString(T("detail.fix_action1") +
+				T("detail.schema_too_new_1") +
+				T("detail.schema_too_new_2"))
 		} else {
-			b.WriteString("\r\n处置: ① 复制路径后人工修复该文件；或 ② 用空配置重新开始（原文件会被改名为 " +
-				"config.json.corrupt-<时间戳>，内容保留、不删除）。\r\n")
+			b.WriteString(T("detail.fix_action2_1") +
+				T("detail.fix_action2_2"))
 		}
 	}
 
 	if r, ok := g.selectedRow(); ok {
-		b.WriteString(fmt.Sprintf("目标 %s\r\n", r.id))
+		b.WriteString(fmt.Sprintf(T("detail.target_header"), r.id))
 		b.WriteString(fmt.Sprintf("  Android IP : %s\r\n", r.ip))
-		b.WriteString(fmt.Sprintf("  SMB 端口   : %d\r\n", r.port))
-		b.WriteString(fmt.Sprintf("  运行态     : %s\r\n", r.runtimeDisplay()))
-		b.WriteString(fmt.Sprintf("  可达性     : %s\r\n", r.reachDisplay()))
+		b.WriteString(fmt.Sprintf(T("detail.target_port"), r.port))
+		b.WriteString(fmt.Sprintf(T("detail.target_runtime"), r.runtimeDisplay()))
+		b.WriteString(fmt.Sprintf(T("detail.target_reach"), r.reachDisplay()))
 		if n := r.noteDisplay(); n != "" {
-			b.WriteString(fmt.Sprintf("  说明       : %s\r\n", n))
+			b.WriteString(fmt.Sprintf(T("detail.target_note"), n))
 		}
 		if r.rtErr != nil {
-			b.WriteString(fmt.Sprintf("  ⛔ 失败原因 : [%s] %s\r\n", r.rtErr.Code, r.rtErr.Summary))
+			b.WriteString(fmt.Sprintf(T("detail.target_failure"), r.rtErr.Code, r.rtErr.Summary))
 			if r.rtErr.Detail != "" {
 				b.WriteString("     " + r.rtErr.Detail + "\r\n")
 			}
-			b.WriteString("     建议     : 检查权限 / 驱动状态后，使用「重试启动」。\r\n")
+			b.WriteString(T("detail.target_advice"))
 		}
 		b.WriteString("\r\n")
 	}
@@ -414,15 +445,15 @@ func (g *gui) renderDetails() {
 		}
 	}
 	if len(targetErrs) > 0 {
-		b.WriteString("目标级错误：\r\n")
+		b.WriteString(T("detail.target_errors_header"))
 		for _, e := range targetErrs {
-			b.WriteString(fmt.Sprintf("  [%s] %s（目标 %s）\r\n", e.Code, e.Summary, shortID(e.TargetID)))
+			b.WriteString(fmt.Sprintf(T("detail.target_error_line"), e.Code, e.Summary, shortID(e.TargetID)))
 		}
 		b.WriteString("\r\n")
 	}
 
 	if len(g.snap.Recent) > 0 {
-		b.WriteString("最近事件：\r\n")
+		b.WriteString(T("detail.recent_events_header"))
 		evs := g.snap.Recent
 		if len(evs) > 6 {
 			evs = evs[len(evs)-6:]
@@ -464,7 +495,7 @@ func (g *gui) updateTray(s snapshot.Snapshot) {
 	}
 	if g.actApply != nil {
 		has := g.draft.hasUnsaved()
-		_ = g.actApply.SetText(fmt.Sprintf("应用更改（%d 项未保存）", g.draft.pendingCount()))
+		_ = g.actApply.SetText(fmt.Sprintf(T("status.apply_with_pending"), g.draft.pendingCount()))
 		_ = g.actApply.SetVisible(has)
 		_ = g.actApply.SetEnabled(has && !busy && !unavailable)
 	}
@@ -505,12 +536,31 @@ func (g *gui) updateEnabled(s snapshot.Snapshot) {
 	set(g.btnEdit, !busy && !unavailable && g.hasSelection())
 	set(g.btnDel, !busy && !unavailable && g.hasSelection())
 
-	set(g.btnTest, !busy && g.hasSelection())
-	// 「重试启动」用**磁盘配置**重试，与草稿无关（故不因未保存更改而禁用）。
-	set(g.btnRetry, !busy && !unavailable && running && g.selectedFailed())
-	set(g.btnInspect, !busy)
+	// 「连接」：要求该行**已持久化**且其 runtime 正在运行（decisions/012 C1：⛔ 不自动 Start）。
+	//  ⛔ "待删除"行不可连接。
+	connectable := func(r guiRow) bool {
+		return !busy && !unavailable && !r.pendingDelete &&
+			r.persisted && r.runtime == snapshot.RTRunning
+	}
+	if r, ok := g.selectedRow(); ok {
+		set(g.btnConnect, connectable(r))
+	} else {
+		set(g.btnConnect, false)
+	}
+	set(g.btnDebug, !busy)
 	set(g.btnCopy, true)
 	set(g.btnExit, !busy)
+
+	// 右键菜单的动作与按钮同步可用性（菜单本身在右键时已把命中行设为当前行）。
+	if r, ok := g.selectedRow(); ok {
+		g.setActionEnabled(g.actCtxConnect, connectable(r))
+		g.setActionEnabled(g.actCtxEdit, !busy && !unavailable)
+		g.setActionEnabled(g.actCtxDelete, !busy && !unavailable)
+	} else {
+		g.setActionEnabled(g.actCtxConnect, false)
+		g.setActionEnabled(g.actCtxEdit, false)
+		g.setActionEnabled(g.actCtxDelete, false)
+	}
 
 	// 「配置不可用」面板（decisions/008 §14）。
 	if g.pnlUnavailable != nil {
@@ -522,9 +572,9 @@ func (g *gui) updateEnabled(s snapshot.Snapshot) {
 	set(g.btnQuarantine, unavailable && !schemaTooNew && !busy)
 
 	// 删除按钮在"待删除"行上变成"撤销删除"（decisions/008 §8）。
-	label := "删除"
+	label := T("main.delete")
 	if r, ok := g.selectedRow(); ok && r.pendingDelete {
-		label = "撤销删除"
+		label = T("btn.undo_delete")
 	}
 	if g.btnDel != nil {
 		_ = g.btnDel.SetText(label)
@@ -542,6 +592,7 @@ func (g *gui) buildRows(s snapshot.Snapshot) []guiRow {
 			id:        t.ID,
 			ip:        t.AndroidIP.String(),
 			port:      t.AndroidPort,
+			username:  t.Username,
 			persisted: g.draft.isPersisted(t.ID),
 			unsaved:   g.draft.isUnsavedTarget(t.ID),
 			note:      noteFor(t),
@@ -601,11 +652,6 @@ func (g *gui) selectedRow() (guiRow, bool) {
 	return g.mdl.row(g.tv.CurrentIndex())
 }
 
-func (g *gui) selectedFailed() bool {
-	r, ok := g.selectedRow()
-	return ok && r.runtime == snapshot.RTFailed
-}
-
 func (g *gui) onSelectionChanged() {
 	g.renderDetails()
 	g.updateEnabled(g.snap)
@@ -621,28 +667,28 @@ func (g *gui) runAsync(name string, fn func() error) {
 		}
 		g.mw.Synchronize(func() {
 			// 用户**显式发起**的动作失败 ⇒ 立即明确告知；同样的错误也会出现在横幅/详情里。
-			walk.MsgBox(g.mw, name+"失败", errText(err), walk.MsgBoxIconError)
+			walk.MsgBox(g.mw, name+T("status.failed"), errText(err), walk.MsgBoxIconError)
 		})
 	}()
 }
 
 func errText(err error) string {
 	if errors.Is(err, controller.ErrConfigUnavailable) {
-		return "配置不可用：请先修复配置文件（见详情条）。"
+		return T("err.config_unavailable_hint")
 	}
 	if errors.Is(err, controller.ErrBusy) {
-		return "已有操作正在进行，请稍候。"
+		return T("err.busy")
 	}
 	var ve *controller.ViolationsError
 	if errors.As(err, &ve) {
-		return "配置校验失败：\r\n  · " + strings.Join(ve.Violations, "\r\n  · ")
+		return T("err.violations_header") + strings.Join(ve.Violations, "\r\n  · ")
 	}
 	return fmt.Sprintf("[%s] %v", diag.CodeOr(err, diag.CodeInternalError), err)
 }
 
-func (g *gui) onStart() { g.runAsync("启动", func() error { return g.ctl.Start() }) }
+func (g *gui) onStart() { g.runAsync(T("main.start"), func() error { return g.ctl.Start() }) }
 
-func (g *gui) onStop() { g.runAsync("停止", func() error { return g.ctl.Stop() }) }
+func (g *gui) onStop() { g.runAsync(T("main.stop"), func() error { return g.ctl.Stop() }) }
 
 // onApply 是**唯一**的配置提交入口（decisions/008 **G11**）：
 // GUI 提交 Draft，由 Controller 内部按 006 §6.12 的顺序完成
@@ -651,51 +697,108 @@ func (g *gui) onStop() { g.runAsync("停止", func() error { return g.ctl.Stop()
 // ⛔ 不得拆成独立的 Save + Apply 两个可并发命令。
 func (g *gui) onApply() {
 	draftCopy := g.draft.list()
-	g.runAsync("应用更改", func() error { return g.ctl.Apply(draftCopy) })
+	g.runAsync(T("main.apply"), func() error { return g.ctl.Apply(draftCopy) })
+}
+
+// beginDialog 提供对话框的**重入保护**：双击被派发两次、或菜单与按钮同时触发时，
+// ⛔ 不得打开两个编辑框（2026-10-09 Gate 明确要求）。
+func (g *gui) beginDialog() bool {
+	if g.dialogOpen {
+		return false
+	}
+	g.dialogOpen = true
+	return true
+}
+
+func (g *gui) endDialog() { g.dialogOpen = false }
+
+// onTableMouseUp 处理表格右键：**先把命中行设为当前行**。
+//
+// 这样上下文菜单（以及一切"作用于选中行"的动作）作用于**用户真正点到的那一行**，
+// ⛔ 不会误操作之前选中的另一行；点在空白处 ⇒ 清空当前行 ⇒ 所有动作变成 no-op。
+func (g *gui) onTableMouseUp(x, y int, button walk.MouseButton) {
+	if button != walk.RightButton || g.tv == nil {
+		return
+	}
+	_ = g.tv.SetCurrentIndex(g.tv.IndexAt(x, y))
+}
+
+// setActionEnabled 只在动作已创建时设置可用性
+// （声明式上下文菜单的 Action 在 `Create()` 期间才产生）。
+func (g *gui) setActionEnabled(a *walk.Action, on bool) {
+	if a != nil {
+		_ = a.SetEnabled(on)
+	}
 }
 
 func (g *gui) onAdd() {
-	res, ok, err := showEditDialog(g.mw, "添加目标", "", model.DefaultAndroidPort, "", g.draft.list())
+	if !g.beginDialog() {
+		return
+	}
+	defer g.endDialog()
+
+	// 新增：无凭据、默认端口（decisions/005 I8）。
+	res, ok, err := showEditDialog(g.mw, T("dialog.add_target"),
+		model.Target{AndroidPort: model.DefaultAndroidPort}, g.draft.list())
 	if err != nil {
-		walk.MsgBox(g.mw, "打开对话框失败", err.Error(), walk.MsgBoxIconError)
+		walk.MsgBox(g.mw, T("err.dialog_open_failed"), err.Error(), walk.MsgBoxIconError)
 		return
 	}
 	if !ok || res == nil {
 		return
 	}
-	if err := g.draft.add(res.ip, res.port); err != nil {
-		walk.MsgBox(g.mw, "添加失败", err.Error(), walk.MsgBoxIconError)
+	if err := g.draft.add(res.ip, res.port, res.username, res.password); err != nil {
+		walk.MsgBox(g.mw, T("err.add_failed"), err.Error(), walk.MsgBoxIconError)
 		return
 	}
 	g.render(g.ctl.Snapshot()) // 只重渲染草稿；**不写盘**
 }
 
+// onEdit 编辑选中行（**双击**与「编辑」按钮、右键菜单的 Edit 同一入口）。
+//
+// ⚠️ 凭据语义（decisions/012 §3.4）：对话框拿到**草稿里的原始 Target**
+// （含原密码），因此"只改 IP/端口"时密码**原样保留**。
 func (g *gui) onEdit() {
+	if !g.beginDialog() {
+		return
+	}
+	defer g.endDialog()
+
 	r, ok := g.selectedRow()
 	if !ok {
 		return
 	}
-	if r.pendingDelete {
+	if r.pendingDelete { // 待删除行：编辑 = 撤销删除
 		g.draft.undoRemove(r.id)
 		g.render(g.ctl.Snapshot())
 		return
 	}
-	res, ok, err := showEditDialog(g.mw, "编辑目标", r.ip, r.port, r.id, g.draft.list())
+	orig, ok := g.draft.byID(r.id)
+	if !ok {
+		walk.MsgBox(g.mw, T("err.edit_failed"), T("err.target_not_found"), walk.MsgBoxIconError)
+		return
+	}
+	res, ok2, err := showEditDialog(g.mw, T("dialog.edit_target"), orig, g.draft.list())
 	if err != nil {
-		walk.MsgBox(g.mw, "打开对话框失败", err.Error(), walk.MsgBoxIconError)
+		walk.MsgBox(g.mw, T("err.dialog_open_failed"), err.Error(), walk.MsgBoxIconError)
 		return
 	}
-	if !ok || res == nil {
+	if !ok2 || res == nil {
 		return
 	}
-	if !g.draft.update(r.id, res.ip, res.port) {
-		walk.MsgBox(g.mw, "编辑失败", "未找到该目标", walk.MsgBoxIconError)
+	if !g.draft.update(r.id, res.ip, res.port, res.username, res.password) {
+		walk.MsgBox(g.mw, T("err.edit_failed"), T("err.target_not_found"), walk.MsgBoxIconError)
 		return
 	}
 	g.render(g.ctl.Snapshot())
 }
 
 func (g *gui) onDel() {
+	if !g.beginDialog() {
+		return
+	}
+	defer g.endDialog()
+
 	r, ok := g.selectedRow()
 	if !ok {
 		return
@@ -705,78 +808,92 @@ func (g *gui) onDel() {
 		g.render(g.ctl.Snapshot())
 		return
 	}
-	msg := fmt.Sprintf("确定删除目标 %s:%d 吗？\r\n\r\n"+
-		"删除只是**编辑草稿**；点击「应用更改」后才真正生效（decisions/008 §8）。", r.ip, r.port)
-	if confirm(g.mw, "删除目标", msg, walk.MsgBoxYesNo) != walk.DlgCmdYes {
+	msg := fmt.Sprintf(T("dlg.delete_confirm_1")+
+		T("dlg.delete_confirm_2"), r.ip, r.port)
+	if confirm(g.mw, T("dlg.delete_title"), msg, walk.MsgBoxYesNo) != walk.DlgCmdYes {
 		return
 	}
 	g.draft.remove(r.id)
 	g.render(g.ctl.Snapshot())
 }
 
-// onTest 连接测试（decisions/007 §4.11 / 008 §12）：
+// onDebug 打开「调试」窗口（decisions/011 §2.7 / 008 §15）：
+// **只读诊断 + 修复（走接管流程）+ 重启 Workstation + 复制详情**。
 //
-//	运行中 → 探测 AndroidIP:445（走完整链路）
-//	未运行 → 探测 AndroidIP:AndroidPort（只验 Android 侧可达）
-//
-// ⚠️ 失败是**非错误**（`NOTE_TARGET_UNREACHABLE`），所以这里不弹错误框；
-// 结果由 Controller 写入快照的 Reach 并重新渲染。
-func (g *gui) onTest() {
-	r, ok := g.selectedRow()
-	if !ok {
-		return
-	}
-	id := r.id
+// ⛔ 窗口内**没有**"强制卸载"；⛔ GUI 不直接执行任何系统命令 —— 动作经 Controller。
+func (g *gui) onDebug() {
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, _ = g.ctl.TestConnection(ctx, id) // 结果/失败都经快照呈现
+		info := g.ctl.Inspect()
+		g.mw.Synchronize(func() { g.showDebugAndHandle(info) })
 	}()
 }
 
-// onRetry 单目标重试启动（decisions/007 §4.9）。
-//
-// 用**磁盘配置**再次 Apply：manager 只对"当前没有 runtime / 已失败"的目标动手，
-// 其余目标不受影响 —— 因此它天然是"按 Target 隔离"的重试。
-func (g *gui) onRetry() {
-	persisted := append([]model.Target(nil), g.snap.Persisted...)
-	g.runAsync("重试启动", func() error { return g.ctl.Apply(persisted) })
+func (g *gui) showDebugAndHandle(info diag.WinDivertInfo) {
+	if !g.beginDialog() {
+		return
+	}
+	act, err := showDebugDialog(g.mw, info, g.debugRepairAllowed())
+	g.endDialog()
+	if err != nil {
+		walk.MsgBox(g.mw, T("err.dialog_open_failed"), err.Error(), walk.MsgBoxIconError)
+		return
+	}
+
+	switch act {
+	case debugActionCopy:
+		if cerr := walk.Clipboard().SetText(g.ctl.CopyDetails()); cerr != nil {
+			walk.MsgBox(g.mw, T("err.copy_failed"), cerr.Error(), walk.MsgBoxIconError)
+		}
+	case debugActionRepair:
+		// 长操作（stop→delete→轮询，可达数秒）⇒ 异步，绝不阻塞 UI 线程。
+		g.runDebugOp(T("debug.repair"), g.ctl.RepairWinDivert)
+	case debugActionRestartWorkstation:
+		g.runDebugOp(T("debug.restart_workstation"), g.ctl.RestartWorkstation)
+	}
 }
 
-// onInspect 只读检查（decisions/007 §4.7.3 / 008 §15）：**只有检查，没有卸载**。
-func (g *gui) onInspect() {
+// runDebugOp 异步执行一个调试动作，完成后**重新打开调试窗口**以显示新状态。
+func (g *gui) runDebugOp(name string, fn func() error) {
 	go func() {
-		info := g.ctl.Inspect()
+		err := fn()
 		g.mw.Synchronize(func() {
-			if err := showInspectDialog(g.mw, info); err != nil {
-				walk.MsgBox(g.mw, "打开对话框失败", err.Error(), walk.MsgBoxIconError)
+			if err != nil {
+				walk.MsgBox(g.mw, name+T("status.failed"), errText(err), walk.MsgBoxIconError)
 			}
+			g.onDebug() // 刷新（重新 Inspect）
 		})
 	}()
 }
 
+// debugRepairAllowed 报告"当前是否允许修复 WinDivert"。
+//
+// ⛔ 必须**没有活动 handle**（decisions/011 §2.7）：运行时不可修复，先"停止"。
+func (g *gui) debugRepairAllowed() bool {
+	return g.snap.Global.Mode != snapshot.ModeRunning && g.snap.Global.Operation == snapshot.OpNone
+}
+
 func (g *gui) onCopy() {
 	if err := walk.Clipboard().SetText(g.ctl.CopyDetails()); err != nil {
-		walk.MsgBox(g.mw, "复制失败", err.Error(), walk.MsgBoxIconError)
+		walk.MsgBox(g.mw, T("err.copy_failed"), err.Error(), walk.MsgBoxIconError)
 	}
 }
 
 func (g *gui) onCopyPath() {
 	if err := walk.Clipboard().SetText(g.snap.Config.Path); err != nil {
-		walk.MsgBox(g.mw, "复制失败", err.Error(), walk.MsgBoxIconError)
+		walk.MsgBox(g.mw, T("err.copy_failed"), err.Error(), walk.MsgBoxIconError)
 	}
 }
 
 // onQuarantine 执行 decisions/006 §6.10 的动作 ②（改名 + 以空配置重开）。
 // ⛔ 只改名：不删除、不覆盖任何文件内容。
 func (g *gui) onQuarantine() {
-	msg := "将把当前配置文件改名为 config.json.corrupt-<时间戳>，\r\n" +
-		"然后用**空配置**重新开始。\r\n\r\n" +
-		"原文件内容会完整保留在新名字下（不删除、不覆盖）。\r\n\r\n确定继续吗？"
-	if confirm(g.mw, "用空配置重新开始", msg, walk.MsgBoxYesNo) != walk.DlgCmdYes {
+	msg := T("dlg.reset_confirm_1") +
+		T("dlg.reset_confirm_2") +
+		T("dlg.reset_confirm_3")
+	if confirm(g.mw, T("main.restart_empty"), msg, walk.MsgBoxYesNo) != walk.DlgCmdYes {
 		return
 	}
-	g.runAsync("以空配置重新开始", func() error {
+	g.runAsync(T("dlg.reset_title"), func() error {
 		_, err := g.ctl.QuarantineConfig()
 		return err
 	})
@@ -785,8 +902,8 @@ func (g *gui) onQuarantine() {
 // onExit 退出（decisions/008 §8 / §16）。
 func (g *gui) onExit() {
 	if g.draft.hasUnsaved() {
-		switch confirm(g.mw, "有未保存更改",
-			"是否保存并应用更改后退出？\r\n\r\n是 = 保存并应用\r\n否 = 放弃更改\r\n取消 = 不退出",
+		switch confirm(g.mw, T("dlg.exit_unsaved_title"),
+			T("dlg.exit_unsaved_text"),
 			walk.MsgBoxYesNoCancel) {
 		case walk.DlgCmdYes:
 			// "保存并应用"仍是**单一** Apply（G11），成功后才退出。
@@ -795,7 +912,7 @@ func (g *gui) onExit() {
 				err := g.ctl.Apply(draftCopy)
 				g.mw.Synchronize(func() {
 					if err != nil {
-						walk.MsgBox(g.mw, "应用更改失败", errText(err), walk.MsgBoxIconError)
+						walk.MsgBox(g.mw, T("err.apply_failed"), errText(err), walk.MsgBoxIconError)
 						return
 					}
 					g.doExit()
@@ -816,7 +933,13 @@ func (g *gui) doExit() {
 		return
 	}
 	g.exiting = true
-	// ⛔ 不执行 sc stop / sc delete、不卸载驱动、不删除 runtime 文件（decisions/007 L5/L6）。
+	// ⛔ 退出路径**不**执行显式清理（不 `sc stop` / 不 `sc delete` / 不删任何文件）：
+	//    进程终止 ⇒ WinDivert handle 全部关闭 ⇒ 驱动卸载 ⇒ 驱动**自删服务注册项**
+	//    ⇒ 实测 `sc query WinDivert` = 1060（2026-10-10，`local_dev/logs/gui-checklist/g17.out`）。
+	//
+	// ⚠️ 该「结果正确」**不等价于** Stop 的显式清理：Stop 会 stop → delete → 轮询 1060 → 等 `.sys` 解锁，
+	//    并**检测/报告**失败；Exit 没有这套动作、也没有错误上报点。见 `decisions/011` §2.4。
+	// ⚠️ 不要把这里读成"因 `decisions/007` L5 而保留"：L5 已被 `decisions/011` §2.4 **反转**（Stop 必须显式删服务）。
 	if g.ni != nil {
 		_ = g.ni.SetVisible(false)
 		_ = g.ni.Dispose()

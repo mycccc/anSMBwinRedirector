@@ -55,13 +55,14 @@ func (f *fakeManager) Apply(desired []model.Target) map[string]error {
 	return errs
 }
 
-func (f *fakeManager) StopAll() {
+func (f *fakeManager) StopAll() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stops++
 	for id := range f.status {
 		f.status[id] = snapshot.RuntimeEntry{State: snapshot.RTStopped}
 	}
+	return nil
 }
 
 func (f *fakeManager) Status() map[string]snapshot.RuntimeEntry {
@@ -93,7 +94,7 @@ func newTestController(t *testing.T) (*Controller, *fakeManager, string) {
 		Store:     config.NewStore(path),
 		Manager:   mgr,
 		Inspector: fakeInspector{},
-		Version:   diag.VersionInfo{Version: "0.1.0-test"},
+		Version:   diag.VersionInfo{Version: "1.0-test"},
 		OSInfo:    "test",
 	})
 	return c, mgr, path

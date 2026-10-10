@@ -65,7 +65,10 @@ Windows SMB Client（全程认为自己在于 AndroidIP:445 通信）
 * **Android 不监听 TCP 445**；Android 实际监听的是一个**可配置的 SMB 端口（默认 TCP 4450）**（根因：Android 应用无法绑定 < 1024 的特权端口，故不能用 445）。
 * **该端口不得写死为 4450**：anSMBserver 的监听端口可被用户修改。
 * **支持多个 Android 目标**：局域网内可能同时存在多台运行 anSMBserver 的设备，**每台对应一条规则**。**多规则 ≠ 通用 NAT。**
-* **每条规则只有两项可配**：`Android IP`（在规则集合内**唯一**）+ `Android SMB Port`（默认 4450）。
+* **一条规则的可配置字段（当前有效定义，2026-10-08 起；见 `decisions/012`）**：`Android IP`（规则集合内**唯一**）+ `Android SMB Port`（默认 4450）+ `用户名` + `密码`。
+  * 其中 **`Android IP` / `Android SMB Port` 是"网络规则"字段**：决定匹配与端口改写；**凭据字段不参与任何匹配或改写**。
+  * **凭据字段的用途只有一个**：`连接` 时把该 IP 的凭据下发给 Windows（凭据管理器），使用户可以用 `\\AndroidIP\` 直接访问。**凭据身份 = `Android IP`**（**改端口不影响凭据**）。
+  * ⛔ **不得因为有了凭据字段就把本项目做成 SMB Server / SMB Client 或凭据管理程序**：本程序**不实现 SMB 协议**；`连接` 只是调用 Windows **自带**能力（凭据管理器 + Explorer）。**同 IP 多账号不允许**（Windows 对同一 IP 只有一个凭据槽）。
   Windows 目的端口 **TCP 445** 与协议 **TCP** 是**全局固定项**，不属于任何单条规则，也不暴露为配置。
 * ⛔ **不得**把 `Windows TCP 445` 单独当成一条规则的**目标**——规则的 Windows 侧匹配目标是**派生**的 `AndroidIP:445`。
 * **不要因此做成通用 NAT**：不允许"任意 FROM → 任意 TO"，也不允许任意协议、UDP、TCP/UDP 选择或代理。
@@ -127,12 +130,42 @@ Windows SMB Client（全程认为自己在于 AndroidIP:445 通信）
 
 **遗留的非阻塞项**（不得改写为 PASS）：
 
-* **A15b = FAIL**：正常退出**不**清理 WinDivert service/driver/runtime；经 P0.1-C 定性为 **WinDivert 的既定生命周期行为**，**不构成技术路线否决**。v1 策略 =「普通退出不卸载 + 只提供**只读检查**，**不提供卸载能力**」—— 理由：卸载所需的安全检查（"无其他 consumer"）在 WinDivert 机制下**不可证明**（`WINDIVERT_LAYER_REFLECT` 无法观察其他 REFLECT handle，官方 `windivertctl` 共享同一盲区）。机制见 `local_dev/docs/decisions/007-v1-single-instance-lifecycle-error-model.md` §4.6/§4.7。
+* **A15b = FAIL**：正常退出**不**清理 WinDivert service/driver/runtime；经 P0.1-C 定性为 **WinDivert 的既定生命周期行为**，**不构成技术路线否决**。
+  > 🔄 **2026-10-08 修订（`decisions/011`，**反转**了此处的原策略）**：
+  > 原策略「普通退出不卸载 + 只提供**只读检查**、**不提供卸载能力**」**已作废**。
+  > **当前有效规则**：
+  > * **首次 `Start` 时"接管"** WinDivert service：若系统中已存在该服务 ⇒ `sc stop` → **轮询直到服务消失（1060）** → 从**当前程序目录**安装 `WinDivert64.sys` → **验证 `ImagePath` 与 DLL/SYS 的 SHA-256** → 才建立 runtime。
+  > * ⛔ **禁止**在旧 service 尚未消失时 `WinDivertOpen()`；⛔ **禁止静默复用**已有（可能指向旧路径/旧版本）的 WinDivert 服务；**接管失败必须显式失败**（`WINDIVERT_TAKEOVER_FAILED`），**不得** fallback 到旧 service。
+  > * **`Stop` 与 `Exit`**：在"runtime 已确认关闭"**之后**，**停止并删除** WinDivert service（这是**改变**，见 `decisions/011` §2.4）。
+  > * **进程启动阶段不碰 WinDivert**（不加载驱动）—— 与 `decisions/007` §4.8 一致（T1 = B）。
+  > * `1072`（服务"已标记为删除"）属**内部竞态**，实现须轮询等待，⛔ **不得**作为用户可见错误（超时才报）。
+  > * Debug 的定位由 "Cleanup" 改为 **诊断 + Repair（只能走上述接管流程）**；⛔ **仍不提供 Force、不提供绕过接管的裸卸载入口**。
+  > * 实机证据：`local_dev/logs/2026-10-08-manual-handover-test-report.md` 附录 C（已证明"已有服务会被静默复用、旧路径 `.sys` 被继续加载"）。
+  * 理由（历史）：卸载所需的"安全检查（无其他 consumer）"在 WinDivert 机制下**不可证明**（`WINDIVERT_LAYER_REFLECT` 无法观察其他 REFLECT handle，官方 `windivertctl` 共享同一盲区）。**该可证明性问题不再是阻碍** —— 新模型下**本程序拥有该 service**，不再依赖"consumer 集合为空"这一前提（见 `decisions/011`）。
   ⚠️ **不得把"重启"等同于"卸载"**：重启只让**当前驱动实例**退出，**不会**删除 service 注册，**也不会**删除 runtime 文件 —— 三者必须分开陈述（口径与 README 措辞见 `decisions/009` §20.1）。
 * **v1 必须单实例**（多实例会因 WinDivert 分发使 OUT/IN 落在不同实例、破坏 flow 隔离）。
 * **FlowTable 当前 key（Windows 临时端口）仅适用于单目标**；multi-target 需重设计 flow identity。
 
 > 详细证据与裁定见 `local_dev/phases/p0/RESULT.md`。
+
+---
+
+## 2.4 GUI 与本地化（当前有效规则，2026-10-08 起；见 `decisions/012` / `013`）
+
+* **GUI 用户可见文案一律来自 localization 层**，载体是**单文件 `language.json`**（EXE 同目录，UTF-8；⛔ 不用 INI、⛔ 不建 `locale/` 目录、⛔ 不引入第三方 i18n 库）。
+  * v1 语言 = `en` + `zh-CN`；**默认 English**；Windows UI language 为中文 ⇒ `zh-CN`；⛔ **不做运行时切换**（启动时确定）。
+  * ⛔ `language.json` **不是**用户配置：**不需要 `schema_version`**、**GUI 不得修改**、**不做 SHA-256 校验**；缺失/损坏 ⇒ **不阻止启动**（内置**极少量** fallback），缺 key ⇒ fallback English + 记诊断。
+  * ⛔ **不得**把 Error Code / JSON 字段名 / 服务名 / 文件名 / 协议常量等**内部契约**做本地化。
+  * ⛔ 源码中**不得**残留下用户可见的字面量（如 `Button.SetText("Start")`）；必须是 `i18n.T("main.start")`。
+* **GUI 列表交互**：**单击 = 选中**（⛔ 不进入编辑、⛔ 无副作用）；**双击 = 编辑**；**右键 = 上下文菜单（连接 / 编辑 / 删除）**；**「连接」按钮与右键菜单的「连接」是同一个 `Connect(TargetID)`**。⛔ 不做"左键长按 = 直接连接"（触摸环境如需，长按 = 打开上下文菜单）。
+* **`Connect` 的执行体不在 GUI 内**：GUI 只发命令；`cmdkey` / `start \\IP\` / `sc` 一律经 **controller 层**执行（见 `decisions/008` 的 G2 修订）。
+* **`连接` 不作 `Start` 的替代**：Connect **要求 Redirector 正在运行**；⛔ 不自动 Start。
+* ⛔ **不做**「连接测试」「重试启动」两个独立按钮（前者被 `Connect` 取代，后者由"再次 Start/Apply"承担）。
+* ⛔ **GUI 不提供 Force、不提供绕过接管流程的裸卸载入口**；**「调试」**窗口（取代原「检查 WinDivert（只读）」）提供 `Repair / Reinstall WinDivert`（只能走 §2.2 的接管流程）与"重启 Workstation 服务"（必须标注为**清理 SMB 客户端会话**，⛔ 不得表述为"修复网络"）。
+  * 调试窗口含**只读诊断**：程序目录 / 运行时文件逐项（路径 + 实际·期望 SHA-256）/ 服务存在性与状态 / `ImagePath`（+ 是否指向本程序目录）/ 驱动版本 / 可观察使用者。**标签本地化、值原样**。
+  * **`Repair` 要求"不在 Running"**（有活动 handle 时无法安全移除服务）⇒ 否则返回 `REPAIR_REQUIRES_STOP`（**非阻塞**）。
+  * ⛔ **GUI 不执行系统命令**：`Repair` / 重启 Workstation 都只**回传意图**，一律经 controller 执行。
+  * 调试动作走 `Operation = Debug`，与 `Apply` / `Start` / `Stop` / `Connect` **互斥**。
 
 ---
 
@@ -819,6 +852,9 @@ Agent 的自主权分为三级。
 > `local_dev/phases/p0/RESULT.md`（含审核者签字裁定）；架构结论见 `decisions/004-v1-architecture-baseline.md`。
 > **唯一的非阻塞例外**：正常退出**不**清理 WinDivert service/driver/runtime（原 A15b = FAIL），
 > 经 P0.1-C 定性为 WinDivert 的既定生命周期行为 —— **不要把它写成 PASS，也不要当成路线否决项**。
+> 🔄 **2026-10-08 补充（`decisions/011`）**：**v1 的 WinDivert 生命周期策略已改变** ——
+> 首次 `Start` 时**接管**（stop → 等 1060 → 按当前目录安装 → 验证），`Stop`/`Exit` **停止并删除** service。
+> 此处"非阻塞例外"仅作为**阶段 1 的历史判定口径**保留，**不代表当前策略**。
 > 下列清单保留为**判定口径**（阶段 2 若引入新机制，仍按此口径复核）。
 
 必须确认：
@@ -1045,20 +1081,36 @@ Agent 不应为了让项目“看起来专业”而主动增加：
 
 # 22. 当前阶段的最高优先级
 
-当前项目处于：
-
-> **项目初始化 / 阶段 1 技术验证**
-
-当前最高优先级：
+**当前状态（2026-10-08）**：
 
 ```text
-证明 Windows 原生 SMB → anSMBwinRedirector → anSMBserver（Android 实际监听端口，默认 4450，**可配置**）
-能够可靠工作。
+阶段 1（技术验证）          PASS
+阶段 2（最小实现）          已实现并经实机验证
+发布                        v0.1.0-rc.1 已封存（tag 不动）
+产品模型收口（011/012/013）  IMPLEMENTATION GATE = PASS
 ```
 
-在此之前：
+**当前最高优先级：按已签核的 011 / 012 / 013 实现"产品模型收口"，分轮推进。**
 
-> **不要把主要精力投入完整 UI、托盘、mDNS、自动发现、自动启动、安装程序等产品化工作。**
+**约定的实现顺序**（不要跳序；GUI 必须最后）：
+
+```text
+① i18n 基础          （先只建立机制：T() / language.json / fallback / key 校验）
+        ↓
+② Config v2 + 迁移   （Target 增加 username/password；schema_version 1 → 2）
+        ↓
+③ Controller / Credential / Connect（cmdkey 下发 + 归属提示 + start \\IP\）
+        ↓
+④ WinDivert lifecycle takeover（防回归条款见 decisions/011 §2.2 T-e）
+        ↓
+⑤ GUI（最后做：它要同时消费 Config v2 / Draft / Snapshot / Connect / Debug / i18n）
+        ↓
+⑥ 集成测试 + 2.7 发布整理（README 措辞等）
+```
+
+**第一轮只做 ① + ② + 对应的单元/离线测试**，完成后做一次小 Gate 再继续。
+
+⚠️ 在此之前仍**不要**把精力投入 mDNS / 自动发现 / 安装程序等，也不要在实现阶段重新解释 `decisions/011` 的"接管"（⛔ 不存在"发现已有服务就直接复用"的捷径）。
 
 ---
 
@@ -1133,7 +1185,7 @@ anSMBwinRedirector/
 │   ├── go.mod / go.sum
 │   └── dist/                   # 构建产物（`.gitignore` 忽略）：dist/release/<pkg>/
 │
-├── scripts/build-release.sh    # **唯一**正式发布入口（组装 6 文件发布包 + 全链校验）
+├── scripts/build-release.sh    # **唯一**正式发布入口（组装 7 文件发布包 + 全链校验）
 │
 ├── README.md                   # 面向使用者（与发布包内 README 同一份）
 ├── LICENSE                     # GPL-3.0-only 全文
@@ -1187,3 +1239,9 @@ tests/                          # 正式长期维护测试
 > **14. 测试以风险覆盖为目的，不为了阶段流程重复执行完全相同的测试。**
 
 > **15. 定位**：`detour` 是**允许复用的 GPLv3 上游代码基础**（本项目采用 GPLv3），不要求保留其通用 NAT/UDP/多规则能力；**WinDivert 2.2.2-A 已于阶段 1 实机验证后正式选定**为 v1 网络拦截机制（见 §2.2）；GUI 库 `lxn/walk` v1 接受（记录长期停滞风险）。见 §2.3。
+
+> **16.（2026-10-08 新增，`decisions/012`）规则模型**：一条规则 = `Android IP`（唯一）+ `Android SMB Port` + `用户名` + `密码`。**凭据字段只用于 `连接` 时向 Windows 下发**，不参与匹配/改写；凭据身份 = `Android IP`。⛔ 不做 SMB Server/Client、不做凭据管理程序、⛔ 不允许同 IP 多账号。
+
+> **17.（2026-10-08 新增，`decisions/011`）WinDivert 生命周期由本程序负责**：**首次 `Start` 时接管**（stop → 等 1060 → 按当前程序目录安装 → 验证 `ImagePath`/hash）；⛔ 禁止静默复用旧 service；接管失败必须显式失败；`Stop`/`Exit` 在 runtime 确认关闭后**停止并删除** service；⛔ 不提供 Force。**程序启动阶段不碰 WinDivert。**
+
+> **18.（2026-10-08 新增，`decisions/013`）GUI 本地化**：用户可见文案一律来自**单文件 `language.json`**（`en` + `zh-CN`，默认 English，启动时确定，⛔ 不做运行时切换）；⛔ 源码不得残留用户可见字面量；⛔ 内部契约（错误码/字段名/服务名）不本地化。

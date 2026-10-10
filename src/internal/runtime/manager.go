@@ -17,6 +17,7 @@ import (
 
 	"ansmbwinhelper/internal/model"
 	"ansmbwinhelper/internal/snapshot"
+	"ansmbwinhelper/internal/winvert"
 )
 
 // Counters 是单个 runtime 的分层归因计数（诊断用）。
@@ -148,9 +149,29 @@ func (m *Manager) Apply(desired []model.Target) map[string]error {
 
 	// --- 再起全部 ---
 	errs := map[string]error{}
+
+	// decisions/011 §2.2：**任何 WinDivertOpen 之前必须接管**。
+	// 只要有目标要新建 runtime，就先确保系统里没有遗留的 WinDivert 服务。
+	// ⛔ 接管失败 ⇒ 这些目标全部显式失败，**不得** fallback 到旧服务（T-b）。
+	pending := make([]model.Target, 0, len(desired))
+	for _, t := range desired {
+		if _, unchanged := m.cur[t.ID]; !unchanged {
+			pending = append(pending, t)
+		}
+	}
+	var takeoverErr error
+	if len(pending) > 0 {
+		takeoverErr = winvert.BeforeOpen()
+	}
+
 	for _, t := range desired {
 		if _, unchanged := m.cur[t.ID]; unchanged {
 			continue // 未变化的 runtime 保持不动（不主动重建）
+		}
+		if takeoverErr != nil {
+			errs[t.ID] = takeoverErr
+			m.failed[t.ID] = takeoverErr
+			continue
 		}
 		rt, err := m.f.New(t)
 		if err != nil {
@@ -170,8 +191,15 @@ func (m *Manager) Apply(desired []model.Target) map[string]error {
 	return errs
 }
 
-// StopAll 停止全部 runtime 并等待"确认关闭"。
-func (m *Manager) StopAll() {
+// StopAll 停止全部 runtime、等待"确认关闭"，**然后**停止并移除 WinDivert 服务。
+//
+// 顺序是硬约束（decisions/011 §2.4）：
+//
+//	停 TargetRuntime →（每个都"确认关闭"，007 L4）→ AfterStop（停服务 + 等消失 + 等 .sys 解锁）
+//
+// ⛔ 不得在 handle 尚未全部关闭时停驱动。
+// 返回值是"服务生命周期"这一步的失败原因（可为 nil）；runtime 停止本身不返回错误。
+func (m *Manager) StopAll() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, e := range m.cur {
@@ -180,6 +208,7 @@ func (m *Manager) StopAll() {
 	}
 	// 停机后不再有"失败"这一状态（全部为 Stopped）。
 	m.failed = map[string]error{}
+	return winvert.AfterStop()
 }
 
 // Status 返回当前全部 runtime 的状态。

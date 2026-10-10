@@ -3,58 +3,63 @@
 package winvert
 
 import (
-	"errors"
-	"os"
 	"strings"
-	"sync"
-	"time"
 
-	"github.com/imgk/divert-go"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"ansmbwinhelper/internal/diag"
 )
 
-// InspectTimeout 是 REFLECT 层事件的收集窗口（该层会补发"打开之前已发生"的事件）。
-const InspectTimeout = 400 * time.Millisecond
-
 // Inspector 实现 controller.Inspector：**只读**的 WinDivert 使用情况检查。
 //
-// ⛔ v1 没有卸载能力（decisions/007 **L6**）：本文件**不得**出现
-// 停止/删除服务或卸载驱动的调用 —— 这里只做查询与报告。
+// ⛔⛔ **硬边界（decisions/011 §9.3 的 D-1 修复，2026-10-09）**：
+// 本文件**不得**出现任何 `divert.Open(...)`（或其它可能隐式安装/加载驱动的 API）。
+//
+//	实测（测试机，可复现）：删除服务后仅调用一次 Inspect，`sc query WinDivert`
+//	就从 **1060（未安装）** 变成 **RUNNING** —— 即"只读检查"会把驱动装上并加载，
+//	违反 007 §4.8 / T1-B。因此只读路径改为**纯 SCM + 文件系统 + 版本资源**：
+//
+//	  ✅ SCM 查询（服务存在性 / 状态 / ImagePath / 归属）
+//	  ✅ 文件系统查询（DLL/SYS 存在性）
+//	  ✅ SHA-256 比对（与编译期期望常量）
+//	  ✅ 文件版本资源（静态元数据，见 version_windows.go）
+//	  ⛔ divert.Open / REFLECT 句柄（会隐式安装+加载驱动）
+//	  ⛔ 运行时驱动版本（只能靠 REFLECT 得到 ⇒ v1 只读路径**不查**，显示"未查询"）
+//	  ⛔ 可观察使用者枚举（同上）
+//
+// 驱动的**安装与加载只允许**发生在明确的 `Start` / 已批准的生命周期操作里。
 type Inspector struct{}
 
 // Inspect 采集 WinDivert 诊断信息（decisions/009 §10）。
 //
-// ⚠️ 会先执行 Prepare()：只读检查同样需要装载 WinDivert **用户态 DLL**。
-// 这**不会**安装或加载驱动 —— 所有 Open 都带 WINDIVERT_FLAG_NO_INSTALL
-// （官方说明：该 flag "is useful for querying the WinDivert state using a
-// WINDIVERT_LAYER_REFLECT handle"）。
+// ⛔ 全程**不打开驱动句柄**（见上）。
 func (Inspector) Inspect() diag.WinDivertInfo {
 	info := diag.WinDivertInfo{Available: true}
 	info.WinDivertDir = DescribeWinDivertFiles()
-	if err := Prepare(); err != nil {
-		// 校验/装载失败 ⇒ 无法查询，但**这不是卸载理由**（L6）。
-		info.Err = err.Error()
-		return info
-	}
-	ok, _ := VerifyWinDivertFiles()
-	info.RuntimeFilesOK = ok
 
-	collectService(&info)
-	if v, err := DriverVersion(); err == nil {
-		info.DriverVersion = v
-	}
-	consumers, err := observableConsumers(InspectTimeout)
-	if err != nil {
+	// 只读检查同样需要装载 WinDivert **用户态 DLL**（Prepare 只 LoadLibrary，不加载驱动）。
+	// ⚠️ 若 DLL 缺失/哈希不符，仍要把"服务/文件"的事实报告出来，而不是只报"不可用"。
+	if err := Prepare(); err != nil {
 		info.Err = err.Error()
 	}
-	info.Consumers = consumers
+	ok, verr := VerifyWinDivertFiles()
+	info.RuntimeFilesOK = ok
+	if !ok && verr != nil && info.Err == "" {
+		info.Err = verr.Error()
+	}
+	// 逐项校验结果（decisions/011 §2.7：路径 + 实际/期望 SHA-256 + 文件版本）。
+	info.Files = RuntimeFileInfos()
+
+	// SCM 查询（不加载驱动）。
+	collectService(&info)
+
+	// ⛔ 不查询运行时驱动版本 / 不枚举可观察使用者（都需要 REFLECT 句柄）。
+	info.ConsumersQueried = false
 	return info
 }
 
-// collectService 查询 WinDivert 服务是否存在、ImagePath 是否属于本程序。
+// collectService 查询 WinDivert 服务是否存在、状态、ImagePath 是否属于本程序。
 func collectService(info *diag.WinDivertInfo) {
 	m, err := mgr.Connect()
 	if err != nil {
@@ -101,63 +106,4 @@ func stateName(s svc.State) string {
 	default:
 		return "Unknown"
 	}
-}
-
-// observableConsumers 用公开的 WINDIVERT_LAYER_REFLECT 层枚举**可观察**的使用者。
-//
-// ⚠️ 关键限制（decisions/009 §10.1 / 007 §4.7.1）：该层**看不到其他 REFLECT 层 handle**。
-// 因此"未发现可观察使用者"**不等于**"系统中不存在其他使用者"——
-// 上层必须在诊断输出中固定声明这一点，且**不得**据此执行任何卸载。
-//
-// 实现方式：打开 REFLECT handle（会补发既有 handle 的事件）→ 收集一个短暂窗口 →
-// 关闭 handle 并用超时兜底等待收集协程退出。
-func observableConsumers(timeout time.Duration) ([]diag.Consumer, error) {
-	// ⚠️ 必须带 FlagNoInstall：只读检查**不得**安装驱动
-	// （decisions/007 §4.8：启动/检查阶段不加载驱动）。
-	h, err := divert.Open("true", divert.LayerReflect, divert.PriorityDefault,
-		divert.FlagSniff|divert.FlagRecvOnly|divert.FlagNoInstall)
-	if err != nil {
-		if errors.Is(err, divert.ErrServiceDoseNotExist) {
-			// 驱动未安装 ⇒ 自然没有使用者，这不是错误。
-			return nil, nil
-		}
-		return nil, MapError(err, "打开 REFLECT 层 handle 失败")
-	}
-
-	var (
-		mu  sync.Mutex
-		out []diag.Consumer
-	)
-	buf := make([]byte, 65535)
-	var addr divert.Address
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		self := uint32(os.Getpid())
-		for {
-			if _, err := h.Recv(buf, &addr); err != nil {
-				return
-			}
-			r := addr.Reflect()
-			// addr 会被下一次 Recv 覆盖 ⇒ 立即复制需要的字段。
-			c := diag.Consumer{PID: r.ProcessID, Layer: r.Layer().String(), IsOurs: r.ProcessID == self}
-			mu.Lock()
-			out = append(out, c)
-			mu.Unlock()
-		}
-	}()
-
-	time.Sleep(timeout)
-	_ = h.Shutdown(divert.ShutdownBoth)
-	_ = h.Close()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	return append([]diag.Consumer(nil), out...), nil
 }

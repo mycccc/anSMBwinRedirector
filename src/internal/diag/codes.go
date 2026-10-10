@@ -7,7 +7,13 @@
 //	§10 WinDivert 诊断（数据结构；采集在平台层）
 //
 // 本包是纯逻辑，不依赖 Windows。
+//
+// ⚠️ 本地化（decisions/013 §6.2）：**用户可见文案**（错误摘要 / 提示 / 分类 / 范围 / 复制详情
+// 模板与字段标签）统一经 `i18n.T()` 取得 —— 因此码表里存的是 **key**，渲染时才翻译。
+// ⛔ **内部契约不本地化**：`Code` / `Scope` / `Source` 的取值、`Summary` 的原始 detail。
 package diag
+
+import "ansmbwinhelper/internal/i18n"
 
 // Code 是稳定的错误码（decisions/009 §2.1）。
 //
@@ -29,11 +35,26 @@ const (
 	CodeDriverVersionIncompatible Code = "DRIVER_VERSION_INCOMPATIBLE"
 	CodeDriverBlocked             Code = "DRIVER_BLOCKED"
 	CodeBFENotRegistered          Code = "BFE_NOT_REGISTERED"
+	// CodeWinDivertTakeoverFailed：WinDivert 服务**接管失败**（Start 前置）或**移除失败**（Stop/Exit）。
+	// decisions/011 §2.5 / T-e：⛔ 不得静默复用旧服务、⛔ 不得 fallback。
+	CodeWinDivertTakeoverFailed Code = "WINDIVERT_TAKEOVER_FAILED"
+	// CodeRepairRequiresStop：要求"修复 WinDivert"时重定向仍在运行（有活动 handle）⇒ 拒绝。
+	// decisions/011 §2.7：修复 = 接管流程，必须在**没有活动 handle** 时进行。
+	CodeRepairRequiresStop Code = "REPAIR_REQUIRES_STOP"
+
+	// CodeWorkstationRestartFailed：重启 Windows Workstation 服务失败（decisions/011 §2.7 的调试动作）。
+	CodeWorkstationRestartFailed Code = "WORKSTATION_RESTART_FAILED"
 
 	// --- 资源 / 目标 ---
 	CodeResourceExhausted    Code = "RESOURCE_EXHAUSTED"
 	CodeTargetStartFailed    Code = "TARGET_START_FAILED"
 	CodeRuntimeInternalError Code = "RUNTIME_INTERNAL_ERROR"
+
+	// --- 连接（decisions/012；2026-10-08 新增）---
+	// ⚠️ 全部是**单目标、非阻塞**：连接失败不影响 runtime（007 L7）。
+	CodeConnectNotRunning     Code = "CONNECT_NOT_RUNNING"
+	CodeCredentialWriteFailed Code = "CREDENTIAL_WRITE_FAILED"
+	CodeShareOpenFailed       Code = "SHARE_OPEN_FAILED"
 
 	// --- 内部（编程错误，不应出现）---
 	CodeInternalError Code = "INTERNAL_ERROR"
@@ -46,19 +67,47 @@ const (
 )
 
 // Category 是错误分类（decisions/009 §2.1）。
+//
+// ⚠️ 取值是**稳定内部标识**（英文，与 Scope / Source 一致），**不是**展示文案；
+// 展示一律经 `CategoryText()`（decisions/013 §6.2：分类属用户可见标签）。
 type Category string
 
 const (
-	CatPlatform       Category = "平台"
-	CatPermission     Category = "权限"
-	CatSingleInstance Category = "单实例"
-	CatRuntimeFile    Category = "运行时文件"
-	CatDriver         Category = "驱动"
-	CatResource       Category = "资源"
-	CatConfig         Category = "配置"
-	CatTarget         Category = "目标态"
-	CatInternal       Category = "内部"
+	CatPlatform       Category = "Platform"
+	CatPermission     Category = "Permission"
+	CatSingleInstance Category = "SingleInstance"
+	CatRuntimeFile    Category = "RuntimeFile"
+	CatDriver         Category = "Driver"
+	CatResource       Category = "Resource"
+	CatConfig         Category = "Config"
+	CatTarget         Category = "Target"
+	CatConnect        Category = "Connect"
+	CatSystem         Category = "System"
+	CatInternal       Category = "Internal"
 )
+
+// categoryKey 把分类标识映射到本地化 key（展示用）。
+var categoryKey = map[Category]string{
+	CatPlatform:       "diag.category.platform",
+	CatPermission:     "diag.category.permission",
+	CatSingleInstance: "diag.category.single_instance",
+	CatRuntimeFile:    "diag.category.runtime_file",
+	CatDriver:         "diag.category.driver",
+	CatResource:       "diag.category.resource",
+	CatConfig:         "diag.category.config",
+	CatTarget:         "diag.category.target",
+	CatConnect:        "diag.category.connect",
+	CatSystem:         "diag.category.system",
+	CatInternal:       "diag.category.internal",
+}
+
+// CategoryText 返回分类的**展示文案**（未知分类原样返回，便于诊断）。
+func CategoryText(c Category) string {
+	if k, ok := categoryKey[c]; ok {
+		return i18n.T(k)
+	}
+	return string(c)
+}
 
 // Scope 决定呈现位置（decisions/008 §13 / decisions/009 §5）。
 type Scope string
@@ -74,67 +123,106 @@ const (
 	ScopeStartupBlock Scope = "StartupBlock"
 )
 
+// scopeKey 把 Scope 映射到本地化 key（展示用；⛔ 不改 Scope 取值本身）。
+var scopeKey = map[Scope]string{
+	ScopeGlobal:       "diag.scope.global",
+	ScopeTarget:       "diag.scope.target",
+	ScopeConfig:       "diag.scope.config",
+	ScopeStartupBlock: "diag.scope.startup_block",
+}
+
+// ScopeText 返回范围的**展示文案**（未知范围原样返回）。
+func ScopeText(s Scope) string {
+	if k, ok := scopeKey[s]; ok {
+		return i18n.T(k)
+	}
+	return string(s)
+}
+
 // Source 标记错误产生的阶段（decisions/009 §2.1）。
 type Source string
 
 const (
 	SrcStartup Source = "Startup"
 	SrcStart   Source = "Start"
+	SrcStop    Source = "Stop"
 	SrcApply   Source = "Apply"
 	SrcRuntime Source = "Runtime"
 	SrcInspect Source = "Inspect"
 	SrcExit    Source = "Exit"
+	// SrcConnect 是"连接某个目标"（decisions/012；2026-10-08 新增）。
+	SrcConnect Source = "Connect"
+	// SrcDebug 是「调试」窗口里的动作（修复 / 重新接管 WinDivert、重启 Workstation；
+	// decisions/011 §2.7；2026-10-09 新增）。
+	SrcDebug Source = "Debug"
 )
 
 type codeMeta struct {
 	Category Category
 	Scope    Scope
-	Summary  string
+	// summaryKey 是用户可见摘要的**本地化 key**（decisions/013 §6.2）。
+	summaryKey string
 	// Blocking 表示该错误会阻止 Start/Apply（decisions/006 §6.10 / 008 §14）。
 	Blocking bool
 }
 
-// codeTable 是 Code ↔ Category / Scope / 摘要 的**唯一来源**。
+// Summary 返回当前语言下的摘要文案。
+func (m codeMeta) Summary() string { return i18n.T(m.summaryKey) }
+
+// codeTable 是 Code ↔ Category / Scope / 摘要 key 的**唯一来源**。
 // 映射固定，实现不得另建一套。
 var codeTable = map[Code]codeMeta{
 	CodePlatformUnsupported: {CatPlatform, ScopeStartupBlock,
-		"当前平台不受支持（v1 仅支持 Windows x64）", true},
+		"diag.err.platform_unsupported", true},
 	CodeAdminRequired: {CatPermission, ScopeGlobal,
-		"需要管理员权限", true},
+		"diag.err.admin_required", true},
 	CodeSingleInstanceConflict: {CatSingleInstance, ScopeStartupBlock,
-		"anSMBwinRedirector 已在运行", true},
+		"diag.err.single_instance", true},
 
 	CodeRuntimeFileMissing: {CatRuntimeFile, ScopeGlobal,
-		"WinDivert 运行时文件缺失", true},
+		"diag.err.runtime_file_missing", true},
 	CodeRuntimeFileCorrupt: {CatRuntimeFile, ScopeGlobal,
-		"WinDivert 运行时文件已损坏（内容与预期不符）", true},
+		"diag.err.runtime_file_corrupt", true},
 
 	CodeDriverSignatureInvalid: {CatDriver, ScopeGlobal,
-		"WinDivert 驱动签名无效", true},
+		"diag.err.driver_signature_invalid", true},
 	CodeDriverVersionIncompatible: {CatDriver, ScopeGlobal,
-		"系统中已加载不兼容版本的 WinDivert 驱动", true},
+		"diag.err.driver_version_incompatible", true},
 	CodeDriverBlocked: {CatDriver, ScopeGlobal,
-		"WinDivert 驱动无法加载（可能被安全软件阻止或环境不支持）", true},
+		"diag.err.driver_blocked", true},
 	CodeBFENotRegistered: {CatDriver, ScopeGlobal,
-		"基础筛选引擎（BFE）服务未运行", true},
+		"diag.err.bfe_not_registered", true},
+	CodeWinDivertTakeoverFailed: {CatDriver, ScopeGlobal,
+		"diag.err.windivert_takeover_failed", true},
+	CodeRepairRequiresStop: {CatDriver, ScopeGlobal,
+		"diag.err.repair_requires_stop", false},
+	CodeWorkstationRestartFailed: {CatSystem, ScopeGlobal,
+		"diag.err.workstation_restart_failed", false},
 
 	CodeResourceExhausted: {CatResource, ScopeTarget,
-		"资源不足（句柄或内存）", false},
+		"diag.err.resource_exhausted", false},
 	CodeTargetStartFailed: {CatTarget, ScopeTarget,
-		"该目标的运行时启动失败", false},
+		"diag.err.target_start_failed", false},
 	CodeRuntimeInternalError: {CatInternal, ScopeTarget,
-		"运行时内部错误，该目标已停止", false},
+		"diag.err.runtime_internal", false},
+
+	CodeConnectNotRunning: {CatConnect, ScopeTarget,
+		"diag.err.connect_not_running", false},
+	CodeCredentialWriteFailed: {CatConnect, ScopeTarget,
+		"diag.err.credential_write_failed", false},
+	CodeShareOpenFailed: {CatConnect, ScopeTarget,
+		"diag.err.share_open_failed", false},
 	CodeInternalError: {CatInternal, ScopeTarget,
-		"内部错误（请报告）", false},
+		"diag.err.internal", false},
 
 	CodeConfigIOError: {CatConfig, ScopeConfig,
-		"配置文件读写失败", true},
+		"diag.err.config_io", true},
 	CodeConfigParseError: {CatConfig, ScopeConfig,
-		"配置文件解析失败", true},
+		"diag.err.config_parse", true},
 	CodeConfigSchemaUnsupported: {CatConfig, ScopeConfig,
-		"配置文件由更高版本写入，本程序无法读取", true},
+		"diag.err.config_schema_unsupported", true},
 	CodeConfigValidationFailed: {CatConfig, ScopeConfig,
-		"配置校验失败", true},
+		"diag.err.config_validation", true},
 }
 
 // Meta 返回 Code 的分类信息；未知 Code 归入内部错误（不应发生）。
@@ -142,7 +230,8 @@ func Meta(c Code) codeMeta {
 	if m, ok := codeTable[c]; ok {
 		return m
 	}
-	return codeMeta{Category: CatInternal, Scope: ScopeTarget, Summary: string(c), Blocking: false}
+	// 未知 Code：摘要回退为 Code 本身（`i18n.T` 查不到 key 时返回 key）。
+	return codeMeta{Category: CatInternal, Scope: ScopeTarget, summaryKey: string(c), Blocking: false}
 }
 
 // Known 报告 Code 是否在本决策的封闭集合内。
@@ -181,13 +270,13 @@ const (
 	NoteReflectConsumersUnprovable Note = "NOTE_REFLECT_CONSUMERS_UNPROVABLE"
 )
 
-// noteText 是提示的固定文案。
-var noteText = map[Note]string{
-	NoteTargetUnreachable:            "目标不可达（仅表示最近一次连接测试结果，与运行时状态无关）",
-	NoteAndroidPortEqualsWindowsPort: "Android SMB 端口与 Windows SMB 端口相同，无需端口重定向",
-	NoteMutexAbandoned:               "观察到单实例互斥体处于 abandoned 状态（本程序不据此判定上次运行是否异常结束）",
-	NoteReflectConsumersUnprovable:   "REFLECT 层使用者无法枚举，因此无法证明系统中不存在其他 WinDivert 使用者",
+// noteKey 是提示的本地化 key（decisions/013 §6.2：提示属用户可见文案）。
+var noteKey = map[Note]string{
+	NoteTargetUnreachable:            "diag.note.target_unreachable",
+	NoteAndroidPortEqualsWindowsPort: "diag.note.port_equals",
+	NoteMutexAbandoned:               "diag.note.mutex_abandoned",
+	NoteReflectConsumersUnprovable:   "diag.note.reflect_unprovable",
 }
 
-// NoteText 返回提示文案。
-func NoteText(n Note) string { return noteText[n] }
+// NoteText 返回当前语言下的提示文案。
+func NoteText(n Note) string { return i18n.T(noteKey[n]) }

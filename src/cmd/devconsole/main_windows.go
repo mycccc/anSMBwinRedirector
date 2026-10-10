@@ -19,13 +19,14 @@ import (
 
 	"ansmbwinhelper/internal/app"
 	"ansmbwinhelper/internal/diag"
+	"ansmbwinhelper/internal/i18n"
 	ansmbrt "ansmbwinhelper/internal/runtime"
 	"ansmbwinhelper/internal/snapshot"
 )
 
 // 由 -ldflags -X 注入（decisions/009 §14）。
 var (
-	version   = "0.1.0-dev"
+	version   = "1.0-dev"
 	commit    = ""
 	buildTime = ""
 	release   = "dev"
@@ -40,6 +41,10 @@ func main() {
 }
 
 func run() int {
+	// decisions/013：与产品入口一致，启动时确定语言并注入进程级翻译器
+	// （否则 diag.NoteText 等会退化成 key 字符串）。
+	i18n.SetDefault(i18n.LoadDefault())
+
 	// 最小开关（仅开发/测试所需；不构成 CLI 产品）。
 	configPath := flag.String("config", "", "覆盖配置文件路径（仅开发/测试用）")
 	duration := flag.Duration("duration", 0, "运行指定时长后自动停止（0 = 直到 Ctrl+C）")
@@ -161,7 +166,7 @@ func printInspect(info diag.WinDivertInfo) {
 		fmt.Printf("   服务路径 : %s\n", info.ServiceImagePath)
 	}
 	fmt.Printf("   ImagePath 属于本程序 runtime : %v\n", info.ImagePathIsOurs)
-	fmt.Printf("   驱动状态 : %s   驱动版本: %s\n", info.DriverState, info.DriverVersion)
+	fmt.Printf("   驱动状态 : %s   运行时驱动版本: %s\n", info.DriverState, info.DriverRuntimeVersion)
 	fmt.Printf("   WinDivert 文件目录 : %s (完整=%v)\n", info.WinDivertDir, info.RuntimeFilesOK)
 	if len(info.Consumers) == 0 {
 		fmt.Println("   可观察使用者 : （无）")

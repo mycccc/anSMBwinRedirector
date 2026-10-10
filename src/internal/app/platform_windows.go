@@ -12,6 +12,7 @@ import (
 
 	"ansmbwinhelper/internal/controller"
 	"ansmbwinhelper/internal/diag"
+	"ansmbwinhelper/internal/i18n"
 	ansmbrt "ansmbwinhelper/internal/runtime"
 	"ansmbwinhelper/internal/winvert"
 )
@@ -51,7 +52,7 @@ func checkPlatform() error {
 	}
 	if native != "AMD64" {
 		return diag.Errorf(diag.CodePlatformUnsupported,
-			"检测到本机处理器架构为 %s；v1 仅支持 Windows x64", native)
+			i18n.T("app.platform_arch"), native)
 	}
 	return nil
 }
@@ -59,7 +60,7 @@ func checkPlatform() error {
 // checkAdmin 检查管理员权限（decisions/007 §4.8 P1）。
 func checkAdmin() error {
 	if !windows.GetCurrentProcessToken().IsElevated() {
-		return diag.Errorf(diag.CodeAdminRequired, "当前进程未以管理员身份运行")
+		return diag.Errorf(diag.CodeAdminRequired, "%s", i18n.T("app.admin_required"))
 	}
 	return nil
 }
@@ -75,7 +76,7 @@ func checkAdmin() error {
 func acquireSingleInstance() (*SingleInstance, error) {
 	name, err := windows.UTF16PtrFromString(mutexName)
 	if err != nil {
-		return nil, diag.Wrap(diag.CodeSingleInstanceConflict, err, "构造互斥体名失败")
+		return nil, diag.Wrap(diag.CodeSingleInstanceConflict, err, "%s", i18n.T("app.mutex_name_failed"))
 	}
 	h, err := windows.CreateMutex(nil, false, name)
 	// ⚠️ x/sys/windows 的 CreateMutex 在**对象已存在**时会返回 ERROR_ALREADY_EXISTS，
@@ -85,16 +86,16 @@ func acquireSingleInstance() (*SingleInstance, error) {
 	if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 		// 真正的创建失败（例如无权创建 Global\ 对象）⇒ 明确报错，
 		// ⛔ 不降级为 Local\（那会静默削弱"整机唯一"）。
-		return nil, diag.Wrap(diag.CodeSingleInstanceConflict, err, "创建单实例互斥体失败")
+		return nil, diag.Wrap(diag.CodeSingleInstanceConflict, err, "%s", i18n.T("app.mutex_create_failed"))
 	}
 	if h == 0 {
-		return nil, diag.Errorf(diag.CodeSingleInstanceConflict, "创建单实例互斥体失败")
+		return nil, diag.Errorf(diag.CodeSingleInstanceConflict, "%s", i18n.T("app.mutex_create_failed"))
 	}
 
 	res, err := windows.WaitForSingleObject(h, 0)
 	if err != nil {
 		_ = windows.CloseHandle(h)
-		return nil, diag.Wrap(diag.CodeSingleInstanceConflict, err, "等待单实例互斥体失败")
+		return nil, diag.Wrap(diag.CodeSingleInstanceConflict, err, "%s", i18n.T("app.mutex_wait_failed"))
 	}
 	switch res {
 	case windows.WAIT_OBJECT_0:
@@ -103,7 +104,7 @@ func acquireSingleInstance() (*SingleInstance, error) {
 		return &SingleInstance{handle: h, MutexAbandoned: true}, nil
 	default: // WAIT_TIMEOUT
 		_ = windows.CloseHandle(h)
-		return nil, diag.Errorf(diag.CodeSingleInstanceConflict, "anSMBwinRedirector 已在运行")
+		return nil, diag.Errorf(diag.CodeSingleInstanceConflict, "%s", i18n.T("app.already_running"))
 	}
 }
 
@@ -128,7 +129,7 @@ func OSInfo() string {
 // NativeArch 返回本机（native）架构。
 func NativeArch() string {
 	if v := os.Getenv("PROCESSOR_ARCHITEW6432"); v != "" {
-		return fmt.Sprintf("%s(本机)/%s(进程)", v, os.Getenv("PROCESSOR_ARCHITECTURE"))
+		return fmt.Sprintf(i18n.T("app.arch_native_fmt"), v, os.Getenv("PROCESSOR_ARCHITECTURE"))
 	}
 	return os.Getenv("PROCESSOR_ARCHITECTURE")
 }

@@ -24,14 +24,23 @@ const (
 	DefaultAndroidPort uint16 = 4450
 )
 
-// Target 是一条规则（decisions/005 §6.1 / decisions/003 §3.1）。
+// Target 是一条规则（decisions/005 §6.1 / decisions/003 §3.1 / decisions/012 §3.1）。
 //
 // ID 是身份：创建时生成一次、不可编辑、持久化、**跨 IP/端口编辑保持不变**。
+//
+// ⚠️ Username / Password 是**凭据字段**（decisions/012）：**不参与任何匹配或改写**，
+// 只在 `Connect` 时用于向 Windows 凭据管理器下发；**凭据身份 = AndroidIP**。
+// Username 为空 ⇒ 该 Target **无凭据**（此时 Password 也必须为空）。
 type Target struct {
 	ID          string
 	AndroidIP   netip.Addr
 	AndroidPort uint16
+	Username    string
+	Password    string
 }
+
+// HasCredentials 报告该 Target 是否配置了凭据。
+func (t Target) HasCredentials() bool { return t.Username != "" }
 
 // WindowsMatchIP 是**派生值**：Windows 侧匹配目标 = AndroidIP:445。
 // 该值不存储、不可编辑（decisions/003 §3.1）。
@@ -60,6 +69,12 @@ var (
 
 	// ErrDuplicateID 表示稳定 ID 重复（decisions/006 §6.6）。
 	ErrDuplicateID = errors.New("目标 ID 重复")
+
+	// ErrPasswordWithoutUsername 表示"有密码但没有用户名"——凭据身份不完整。
+	ErrPasswordWithoutUsername = errors.New("填写了密码但未填写用户名")
+
+	// ErrPasswordRequired 表示"有用户名但密码为空"（decisions/012 C5：只做基本非空校验）。
+	ErrPasswordRequired = errors.New("填写了用户名则密码不能为空")
 )
 
 // reservedHigh 是 240.0.0.0/4（reserved），不可能是真实 Target。
@@ -75,6 +90,9 @@ var broadcast4 = netip.MustParseAddr("255.255.255.255")
 //   - 拒绝：未指定(0.0.0.0)、广播(255.255.255.255)、组播(224.0.0.0/4)、保留(240.0.0.0/4)
 //   - **允许 loopback**（仅用于本机/VM 测试，不代表典型 Android LAN Target）
 //   - AndroidPort ∈ [1,65535]；**445 允许**（实现层按 no-op 处理，decisions/005 §6.1）
+//   - 凭据（decisions/012 §3.1 / C5）：**只做基本非空校验**，⛔ 不做强度/长度/字符集策略；
+//     `Username == ""` ⇒ 无凭据（`Password` 必须为空）；`Username != ""` ⇒ `Password` 不得为空。
+//     凭据**不参与匹配或改写**。
 func ValidateTarget(t Target) error {
 	if t.ID == "" {
 		return ErrIDRequired
@@ -84,6 +102,12 @@ func ValidateTarget(t Target) error {
 	}
 	if t.AndroidPort == 0 {
 		return fmt.Errorf("%w: 0", ErrPortOutOfRange)
+	}
+	if t.Username == "" && t.Password != "" {
+		return ErrPasswordWithoutUsername
+	}
+	if t.Username != "" && t.Password == "" {
+		return ErrPasswordRequired
 	}
 	return nil
 }

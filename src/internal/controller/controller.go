@@ -19,7 +19,10 @@ import (
 	"time"
 
 	"ansmbwinhelper/internal/config"
+	"ansmbwinhelper/internal/connect"
+	"ansmbwinhelper/internal/credential"
 	"ansmbwinhelper/internal/diag"
+	"ansmbwinhelper/internal/i18n"
 	"ansmbwinhelper/internal/model"
 	"ansmbwinhelper/internal/snapshot"
 )
@@ -35,8 +38,9 @@ type RuntimeManager interface {
 	// Apply 把运行中的 runtime 集合收敛到 desired。
 	// 返回受影响 Target 的失败原因；**单个失败不影响其他 Target**（L7）。
 	Apply(desired []model.Target) map[string]error
-	// StopAll 停止全部 runtime 并等待"确认关闭"。
-	StopAll()
+	// StopAll 停止全部 runtime 并等待"确认关闭"，**然后**停止并移除 WinDivert 服务
+	// （decisions/011 §2.4）。返回的是"服务生命周期"这一步的失败原因（可为 nil）。
+	StopAll() error
 	// Status 返回当前所有 runtime 的状态。
 	Status() map[string]snapshot.RuntimeEntry
 }
@@ -57,6 +61,14 @@ type Options struct {
 	OSInfo    string
 	// DialTimeout 是连接测试超时；<=0 时使用默认值。
 	DialTimeout time.Duration
+	// Credential 是凭据访问实现（decisions/012 §3.4）；nil ⇒ 用平台默认实现。
+	Credential credential.Access
+	// Opener 是"打开共享"实现（decisions/012 §3.4）；nil ⇒ 用平台默认实现。
+	Opener connect.Opener
+	// Repairer 是 WinDivert 修复/重新接管实现（decisions/011 §2.7）；nil ⇒ 该动作不可用。
+	Repairer Repairer
+	// SystemOps 是 Windows 系统服务操作（decisions/011 §2.7）；nil ⇒ 该动作不可用。
+	SystemOps SystemOps
 }
 
 // ErrBusy 表示已有操作在进行（decisions/007 L8：串行化，不排队）。
@@ -99,6 +111,12 @@ type Controller struct {
 func New(o Options) *Controller {
 	if o.DialTimeout <= 0 {
 		o.DialTimeout = 5 * time.Second
+	}
+	if o.Credential == nil {
+		o.Credential = credential.New()
+	}
+	if o.Opener == nil {
+		o.Opener = connect.New()
 	}
 	c := &Controller{
 		opts: o,
@@ -226,7 +244,8 @@ func (c *Controller) Start() error {
 	return nil
 }
 
-// Stop 停止全部 runtime。**不写盘、不改配置、不卸载驱动**（decisions/007 L5）。
+// Stop 停止全部 runtime，**然后**停止并移除 WinDivert 服务（decisions/011 §2.4）。
+// **不写盘、不改配置。**
 func (c *Controller) Stop() error {
 	if err := c.begin(snapshot.OpStop); err != nil {
 		return err
@@ -236,7 +255,12 @@ func (c *Controller) Stop() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.opts.Manager.StopAll()
+	if err := c.opts.Manager.StopAll(); err != nil {
+		// 服务生命周期失败是**全局类**错误：不影响"runtime 已停止"这一事实，
+		// 但必须让用户看到（decisions/011 §2.5）。
+		c.agg.Add(diag.New(diag.CodeWinDivertTakeoverFailed, diag.SrcStop, err.Error(), ""))
+		c.ring.Error(diag.SrcStop, "停止 WinDivert 服务失败：%v", err)
+	}
 	c.mode = snapshot.ModeStopped
 	c.agg.ClearByScope(diag.ScopeTarget)
 	c.syncRuntimeLocked()
@@ -303,8 +327,8 @@ func (c *Controller) Inspect() diag.WinDivertInfo {
 	info := c.opts.Inspector.Inspect()
 	c.mu.Lock()
 	c.wd = info
-	c.ring.Info(diag.SrcInspect, "WinDivert 只读检查：服务=%v 归属本程序=%v 可观察使用者=%d",
-		info.ServiceExists, info.ImagePathIsOurs, len(info.Consumers))
+	c.ring.Info(diag.SrcInspect, "WinDivert 只读检查：服务=%v 归属本程序=%v（不打开驱动句柄）",
+		info.ServiceExists, info.ImagePathIsOurs)
 	c.publishLocked()
 	c.mu.Unlock()
 	return info
@@ -331,10 +355,12 @@ func (c *Controller) Shutdown(waitFor time.Duration) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.opts.Manager.StopAll()
+	if err := c.opts.Manager.StopAll(); err != nil {
+		c.ring.Error(diag.SrcExit, "退出时停止 WinDivert 服务失败：%v", err)
+	}
 	c.mode = snapshot.ModeStopped
 	c.syncRuntimeLocked()
-	c.ring.Info(diag.SrcExit, "已停止全部目标；驱动与 runtime 文件按设计保留（本程序不执行卸载）")
+	c.ring.Info(diag.SrcExit, "已停止全部目标并移除 WinDivert 服务（decisions/011 §2.4）")
 	c.publishLocked()
 }
 
@@ -368,7 +394,7 @@ func (c *Controller) Details() diag.Details {
 
 	snap := c.buildSnapshotLocked()
 	total, running, failed := snap.Aggregate()
-	agg := fmt.Sprintf("%d 个目标（%d 运行中 · %d 失败）", total, running, failed)
+	agg := fmt.Sprintf(i18n.T("snapshot.aggregate_n"), total, running, failed)
 
 	return diag.Details{
 		Version:   c.opts.Version,

@@ -13,6 +13,8 @@
 //	④ per-Target 可达性 Unknown | Reachable | Unreachable （与 ③ 无关）
 package snapshot
 
+import "ansmbwinhelper/internal/i18n"
+
 import (
 	"fmt"
 	"sort"
@@ -41,6 +43,13 @@ const (
 	OpStart Operation = "Start"
 	OpStop  Operation = "Stop"
 	OpExit  Operation = "Exit"
+	// OpConnect 是"连接某个目标"（decisions/012）：与 Apply/Start/Stop/Exit 共用同一串行化
+	// （decisions/007 L8）—— 它要求 Running，因此不能与 Stop/Start 并发。
+	OpConnect Operation = "Connect"
+	// OpDebug 是「调试」窗口里的动作（修复 / 重新接管 WinDivert、重启 Workstation 服务，
+	// decisions/011 §2.7）：同样串行化 —— 修复要求"没有活动 handle"，
+	// 因此**不能**与 Start/Stop/Apply/Connect 并发。
+	OpDebug Operation = "Debug"
 )
 
 // RuntimeState 是单个 Target 的运行态。
@@ -54,7 +63,13 @@ const (
 	RTFailed   RuntimeState = "Failed"
 )
 
-// Reachability 是单个 Target 的可达性（与 RuntimeState **正交**）。
+// Reachability 是单个 Target 的**"最近一次「连接」的结果"**（与 RuntimeState **正交**）。
+//
+// ⚠️ **更新来源（decisions/008 §11，Gate 2026-10-09 裁定 = 方案 A）**：
+//   - `Reachable` **只由 `Controller.Connect` 完整成功时写入**（含 `LastCheckedAt`）；
+//   - 连接失败（凭据失败 / 打开共享失败）**不写**任何状态 —— ⛔ 尤其**不写 `Unreachable`**；
+//   - 因此它表示「**最近一次 Connect 操作成功**」，⛔ **不是**独立网络探测/实时可达性，
+//     也**不保证** Android 主机或 SMB 服务今后持续可用。
 type Reachability string
 
 const (
@@ -63,15 +78,17 @@ const (
 	ReachUnreachable Reachability = "Unreachable"
 )
 
-// Display 返回可达性的界面文案（decisions/008 §11：Unknown 显示为"未测试"）。
+// Display 返回界面文案（decisions/008 §11：Unknown 显示为"尚未连接"）。
+//
+// ⚠️ 用户可见文案 ⇒ 经 i18n（decisions/013 §6.2）；取值本身仍是稳定内部标识。
 func (r Reachability) Display() string {
 	switch r {
 	case ReachReachable:
-		return "可达"
+		return i18n.T("snapshot.reach_reachable")
 	case ReachUnreachable:
-		return "不可达"
+		return i18n.T("snapshot.reach_unreachable")
 	default:
-		return "未测试"
+		return i18n.T("snapshot.reach_unknown")
 	}
 }
 
@@ -180,18 +197,20 @@ func (s Snapshot) Aggregate() (total, running, failed int) {
 }
 
 // StatusLine 返回状态条文本（decisions/008 §9）。
+//
+// ⚠️ 用户可见文案 ⇒ 经 i18n（decisions/013 §6.2）。
 func (s Snapshot) StatusLine() string {
 	switch s.Global.Mode {
 	case ModeConfigUnavailable:
-		return "配置不可用"
+		return i18n.T("snapshot.status_config_unavailable")
 	case ModeRunning:
 		total, running, failed := s.Aggregate()
 		if total == 0 {
-			return "运行中 · 0 个目标"
+			return i18n.T("snapshot.status_running_zero")
 		}
-		return fmt.Sprintf("运行中 · %d 个目标（%d 运行中 · %d 失败）", total, running, failed)
+		return fmt.Sprintf(i18n.T("snapshot.status_running_n"), total, running, failed)
 	default:
-		return fmt.Sprintf("已停止 · %d 个目标", len(s.Persisted))
+		return fmt.Sprintf(i18n.T("snapshot.status_stopped_n"), len(s.Persisted))
 	}
 }
 

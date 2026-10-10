@@ -6,8 +6,8 @@
 #   scripts/build-release.sh <version> [release] [--update-syso] [--skip-tests]
 #
 # 例：
-#   scripts/build-release.sh 0.1.0
-#   scripts/build-release.sh 0.1.0 rc1 --skip-tests
+#   scripts/build-release.sh 1.0
+#   scripts/build-release.sh 1.0 rc1 --skip-tests
 #
 # 它做四件事，**每一步都可复现、且带自动校验**（decisions/009 §15–§18 + 010 §B/§G.1）：
 #
@@ -15,8 +15,8 @@
 #   ② Manifest 资源（.syso）：用 `go tool rsrc`（版本锁在 go.mod 的 tool 指令里）**重新生成**，
 #      与仓库中已提交的 rsrc_amd64.syso **逐字节比对**；不一致直接失败（防"人工残留文件"）
 #   ③ WinDivert 哈希链：assets/ 的实际 SHA-256 ⇔ assets_common.go 里的编译期常量
-#   ④ 构建 + 组装发布包（exe + WinDivert.dll + WinDivert64.sys + LICENSE + THIRD_PARTY_NOTICES.md +
-#      README.md），组装**后**再校验发布包里的副本，并打印整条可追溯链
+#   ④ 构建 + 组装发布包（exe + WinDivert.dll + WinDivert64.sys + language.json + LICENSE +
+#      THIRD_PARTY_NOTICES.md + README.md），组装**后**再校验发布包里的副本，并打印整条可追溯链
 #
 # ⛔ 本脚本**不**做任何安装/卸载动作，也不会触碰系统上的 WinDivert service。
 
@@ -29,6 +29,7 @@ MANIFEST_REL="cmd/ansmbwinredirector/anSMBwinRedirector.manifest"
 SYSO_REL="cmd/ansmbwinredirector/rsrc_amd64.syso"
 ASSETS_REL="internal/winvert/assets"
 CONST_REL="internal/winvert/assets_common.go"
+LANG_REL="internal/i18n/assets/language.json"
 
 die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 ok()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -104,6 +105,8 @@ say "3. WinDivert 哈希链（文件 ⇔ 编译期常量）"
 [ -f "${ASSETS_REL}/WinDivert.dll" ] || die "缺少 ${ASSETS_REL}/WinDivert.dll"
 [ -f "${ASSETS_REL}/WinDivert64.sys" ] || die "缺少 ${ASSETS_REL}/WinDivert64.sys"
 [ -f "${ASSETS_REL}/WinDivert-LICENSE.txt" ] || die "缺少 WinDivert 许可文本（必须随包分发，decisions/009 §16）"
+[ -f "${LANG_REL}" ] || die "缺少语言资源 ${LANG_REL}（必须随包分发，decisions/013 §5）"
+grep -q '"zh-CN"' "${LANG_REL}" || die "language.json 缺少 zh-CN 块（decisions/013 §1）"
 
 DLL_SHA="$(shasum -a 256 "${ASSETS_REL}/WinDivert.dll" | awk '{print $1}')"
 SYS_SHA="$(shasum -a 256 "${ASSETS_REL}/WinDivert64.sys" | awk '{print $1}')"
@@ -126,11 +129,12 @@ ok "已构建 anSMBwinRedirector.exe（windowsgui / amd64 / trimpath）"
 say "5. 组装发布包"
 cp "${ASSETS_REL}/WinDivert.dll"        "${OUT_DIR}/"
 cp "${ASSETS_REL}/WinDivert64.sys"      "${OUT_DIR}/"
+cp "${LANG_REL}"                        "${OUT_DIR}/language.json"
 cp "${REPO}/LICENSE"                    "${OUT_DIR}/LICENSE"
 cp "${REPO}/THIRD_PARTY_NOTICES.md"     "${OUT_DIR}/THIRD_PARTY_NOTICES.md"
 cp "${REPO}/README.md"                  "${OUT_DIR}/README.md"
 
-EXPECTED=(anSMBwinRedirector.exe WinDivert.dll WinDivert64.sys LICENSE THIRD_PARTY_NOTICES.md README.md)
+EXPECTED=(anSMBwinRedirector.exe WinDivert.dll WinDivert64.sys language.json LICENSE THIRD_PARTY_NOTICES.md README.md)
 ACTUAL="$(cd "${OUT_DIR}" && ls -1 | sort)"
 WANT="$(printf '%s\n' "${EXPECTED[@]}" | sort)"
 [ "${ACTUAL}" = "${WANT}" ] || { printf '期望:\n%s\n实际:\n%s\n' "${WANT}" "${ACTUAL}"; die "发布包文件集合与 decisions/010 §B.1 不符"; }

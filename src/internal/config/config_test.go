@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -46,7 +47,8 @@ func TestParseSchemaVersionMissingMeansOne(t *testing.T) {
 }
 
 func TestParseRejectsHigherSchemaVersion(t *testing.T) {
-	r := Parse([]byte(`{"schema_version":2,"targets":[]}`))
+	// 当前支持到 v2（decisions/012 §3.2）⇒ v3 必须不可用。
+	r := Parse([]byte(`{"schema_version":3,"targets":[]}`))
 	if r.State != StateUnavailable || r.Code != diag.CodeConfigSchemaUnsupported {
 		t.Fatalf("更高 schema_version 必须不可用，得到 %v/%s", r.State, r.Code)
 	}
@@ -273,5 +275,143 @@ func TestSaveFailureDoesNotDamageCurrentFile(t *testing.T) {
 	after, _ := os.ReadFile(p)
 	if string(before) != string(after) {
 		t.Fatal("保存失败时不得破坏当前有效的 config.json")
+	}
+}
+
+// --- schema v2：凭据字段与 v1 → v2 迁移（decisions/012 §3.1 / §3.2）--------
+
+func mustTargetCred(t *testing.T, id, ip string, port uint16, user, pass string) model.Target {
+	t.Helper()
+	return model.Target{
+		ID: id, AndroidIP: netip.MustParseAddr(ip), AndroidPort: port,
+		Username: user, Password: pass,
+	}
+}
+
+func TestParseV2WithCredentials(t *testing.T) {
+	data := []byte(`{
+	  "schema_version": 2,
+	  "targets": [
+	    { "id": "a", "android_ip": "192.168.1.100", "android_port": 4450,
+	      "username": "ansmb", "password": "s3cret" }
+	  ]
+	}`)
+	r := Parse(data)
+	if r.State != StateLoaded {
+		t.Fatalf("State=%v Detail=%s", r.State, r.Detail)
+	}
+	if r.MigratedFrom != 0 {
+		t.Errorf("v2 文件不应标记迁移，得到 MigratedFrom=%d", r.MigratedFrom)
+	}
+	got := r.Targets[0]
+	if got.Username != "ansmb" || got.Password != "s3cret" {
+		t.Errorf("凭据解析错误: %+v", got)
+	}
+	if !got.HasCredentials() {
+		t.Error("HasCredentials 应为 true")
+	}
+}
+
+func TestParseV1MigratesInMemoryOnly(t *testing.T) {
+	// decisions/012 §3.2：v1 ⇒ 内存迁移（补空凭据），读取路径**不写盘**。
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.json")
+	orig := []byte(`{"schema_version":1,"targets":[{"id":"a","android_ip":"10.0.0.1","android_port":4450}]}`)
+	if err := os.WriteFile(p, orig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore(p)
+	r := s.Load()
+	if r.State != StateLoaded {
+		t.Fatalf("v1 必须可加载（内存迁移），得到 %v/%s", r.State, r.Detail)
+	}
+	if r.MigratedFrom != SchemaVersionLegacyV1 {
+		t.Errorf("应标记 MigratedFrom=1，得到 %d", r.MigratedFrom)
+	}
+	if r.Targets[0].HasCredentials() {
+		t.Error("v1 迁移后凭据应为空（无凭据）")
+	}
+	after, _ := os.ReadFile(p)
+	if string(after) != string(orig) {
+		t.Error("读取路径不得改写 v1 文件（迁移只在内存，保存时才写 v2）")
+	}
+}
+
+func TestParseV1RejectsCredentialFields(t *testing.T) {
+	// decisions/006 §6.2 + 012：v1 里出现 v2 字段属**未知字段** ⇒ 拒绝（按版本严格判定）。
+	data := []byte(`{"schema_version":1,"targets":[{"id":"a","android_ip":"10.0.0.1","android_port":4450,"username":"x"}]}`)
+	r := Parse(data)
+	if r.State != StateUnavailable || r.Code != diag.CodeConfigValidationFailed {
+		t.Fatalf("v1 含凭据字段必须被判未知字段，得到 %v/%s", r.State, r.Code)
+	}
+}
+
+func TestParseCredentialConsistency(t *testing.T) {
+	// decisions/012 C5：只做基本非空校验。
+	base := `{"schema_version":2,"targets":[{"id":"a","android_ip":"10.0.0.1","android_port":4450%s}]}`
+	cases := map[string]struct {
+		extra string
+		ok    bool
+	}{
+		"无凭据（都空）": {``, true},
+		"用户名+密码":  {`,"username":"u","password":"p"`, true},
+		"有密码无用户名": {`,"password":"p"`, false},
+		"有用户名无密码": {`,"username":"u"`, false},
+	}
+	for name, c := range cases {
+		r := Parse([]byte(fmt.Sprintf(base, c.extra)))
+		if c.ok && r.State != StateLoaded {
+			t.Errorf("%s: 应合法，得到 %v/%s", name, r.State, r.Detail)
+		}
+		if !c.ok && r.State != StateUnavailable {
+			t.Errorf("%s: 应被拒绝，得到 %v", name, r.State)
+		}
+	}
+}
+
+func TestMarshalWritesSchemaV2AndRoundTripsCredentials(t *testing.T) {
+	want := []model.Target{mustTargetCred(t, "a", "192.168.1.100", 4450, "ansmb", "s3cret")}
+	b, err := Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"schema_version": 2`) {
+		t.Errorf("必须写 schema_version=2，得到:\n%s", b)
+	}
+	got := Parse(b)
+	if got.State != StateLoaded || got.Targets[0].Username != "ansmb" || got.Targets[0].Password != "s3cret" {
+		t.Fatalf("round-trip 不一致: %v %+v", got.State, got.Targets)
+	}
+}
+
+func TestSaveUpgradesV1FileToV2(t *testing.T) {
+	// decisions/012 §3.2：v1 加载后**成功保存**才升级为 v2。
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(p, []byte(`{"schema_version":1,"targets":[{"id":"a","android_ip":"10.0.0.1","android_port":4450}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := NewStore(p)
+	r := s.Load()
+	if r.State != StateLoaded || r.MigratedFrom != 1 {
+		t.Fatalf("前置条件失败: %v/%d", r.State, r.MigratedFrom)
+	}
+	// 用户补上凭据后保存
+	updated := r.Targets
+	updated[0].Username = "u"
+	updated[0].Password = "p"
+	if err := s.Save(updated); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(p)
+	if !strings.Contains(string(after), `"schema_version": 2`) {
+		t.Errorf("保存后应升级为 v2，得到:\n%s", after)
+	}
+	back := s.Load()
+	if back.MigratedFrom != 0 || back.Targets[0].Username != "u" {
+		t.Errorf("回读失败: %+v", back)
+	}
+	if fileExists(s.BackupPath()) != true {
+		t.Error("第二次保存应产生 .bak（上一版为 v1）")
 	}
 }

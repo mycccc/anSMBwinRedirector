@@ -11,7 +11,7 @@
      ⚠️ 2.7 需要重新评估是否改为 `requireAdministrator`。
 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="anSMBwinRedirector" version="0.2.0.0" processorArchitecture="amd64"/>
+  <assemblyIdentity type="win32" name="anSMBwinRedirector" version="1.0.0.0" processorArchitecture="amd64"/>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"

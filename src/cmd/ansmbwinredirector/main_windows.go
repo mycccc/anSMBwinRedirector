@@ -17,11 +17,12 @@ import (
 	"ansmbwinhelper/internal/app"
 	"ansmbwinhelper/internal/diag"
 	"ansmbwinhelper/internal/gui"
+	"ansmbwinhelper/internal/i18n"
 )
 
 // 由 -ldflags -X 注入（decisions/009 §14）。
 var (
-	version   = "0.1.0-dev"
+	version   = "1.0-dev"
 	commit    = ""
 	buildTime = ""
 	release   = "dev"
@@ -36,6 +37,14 @@ func main() {
 }
 
 func run() int {
+	// decisions/013：**启动时确定语言**（⛔ 不做运行时切换）。
+	// 加载失败/文件缺失 ⇒ 内置 fallback，**不阻止启动**。
+	tr := i18n.LoadDefault()
+	gui.SetTranslator(tr)
+	// ⚠️ 进程级默认翻译器：snapshot / diag / app 等**非 GUI** 的用户可见文案产出点
+	// 也经它取文案（decisions/013 §6.2）。必须在 `app.Start` **之前**注入。
+	i18n.SetDefault(tr)
+
 	a, err := app.Start(app.Options{
 		Version: diag.VersionInfo{
 			Version: version, Commit: commit, BuildTime: buildTime,
@@ -45,7 +54,7 @@ func run() int {
 	})
 	if err != nil {
 		// 启动序列失败（平台 / 权限 / 单实例 / 路径）⇒ 明确的阻塞式提示，含可操作信息。
-		walk.MsgBox(nil, "anSMBwinRedirector 启动失败",
+		walk.MsgBox(nil, gui.T("app.start_failed_title"),
 			fmt.Sprintf("[%s] %v", diag.CodeOr(err, diag.CodeInternalError), err),
 			walk.MsgBoxIconError)
 		return 2

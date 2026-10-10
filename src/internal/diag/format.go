@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"ansmbwinhelper/internal/i18n"
 )
 
 // VersionInfo 是版本 / 构建信息（decisions/009 §14）。
@@ -26,6 +28,28 @@ type Consumer struct {
 	IsOurs bool
 }
 
+// RuntimeFile 是 **WinDivert 运行时文件**的校验结果（decisions/011 §2.7）。
+//
+// ⚠️ Name / Path / SHA-256 全部是**诊断数据** ⇒ 原样呈现，⛔ 不本地化。
+type RuntimeFile struct {
+	// Name 是文件名（内部标识，不本地化），如 `WinDivert.dll`。
+	Name string
+	// Path 是实际检查的路径。
+	Path string
+	// Actual 是实际 SHA-256（小写十六进制）；读不到时为空。
+	Actual string
+	// Expected 是固化的期望 SHA-256。
+	Expected string
+	// Version 是**文件**的版本资源（如 `2.2.2.0`）；读不到时为空（上层显示"未知"）。
+	//
+	// ⚠️ 这是**文件版本**，⛔ 不是"当前已加载驱动的运行时版本"（decisions/011 §9.3 D-1）。
+	Version string
+	// OK 报告是否 "存在 且 哈希一致"。
+	OK bool
+	// Err 是读取/校验失败原因（诊断数据，不本地化）；OK=true 时为空。
+	Err string
+}
+
 // WinDivertInfo 是 WinDivert / 驱动诊断信息（decisions/009 §10）。
 type WinDivertInfo struct {
 	Available        bool
@@ -34,11 +58,23 @@ type WinDivertInfo struct {
 	ServiceImagePath string
 	ImagePathIsOurs  bool
 	DriverState      string
-	DriverVersion    string
+	// DriverRuntimeVersion 是**当前已加载驱动**的运行时版本。
+	//
+	// ⛔ 只能通过 REFLECT 句柄得到，而该句柄会**隐式安装并加载驱动**（decisions/011 §9.3 **D-1**），
+	// 因此**只读诊断路径不再查询它** ⇒ 在 v1 里**恒为空**，上层显示"未查询"。
+	// ⛔ 不得用文件版本或期望版本冒充它。
+	DriverRuntimeVersion string
 	// WinDivertDir 是 WinDivert 运行时文件（DLL/SYS）所在目录（decisions/010 §D）。
 	WinDivertDir   string
 	RuntimeFilesOK bool
-	Consumers      []Consumer
+	// Files 是运行时文件的逐项校验结果（decisions/011 §2.7：路径 + 实际/期望 SHA-256 + 文件版本）。
+	Files []RuntimeFile
+	// ConsumersQueried 报告"可观察使用者"**是否真的查询过**。
+	//
+	// ⛔ 枚举需要一个 REFLECT 句柄（同样会隐式安装驱动）⇒ v1 的只读路径**不查询** ⇒ 恒为 false。
+	// 上层必须在未查询时明确显示"未查询"，⛔ **不得**把"没查"显示成"（无）"。
+	ConsumersQueried bool
+	Consumers        []Consumer
 }
 
 // ConfigInfo 是配置诊断信息（decisions/009 §11；⛔ 不含配置全文）。
@@ -79,6 +115,9 @@ type Details struct {
 
 // FormatDetails 按 decisions/009 §7 的**固定字段顺序**渲染纯文本。
 //
+// ⚠️ 字段**标签/模板**是用户可见文案 ⇒ 一律经 `i18n.T()`（decisions/013 §6.2）；
+// **值**（路径 / 版本 / ErrorCode / PID / true·false / IP / 用户名 …）**原样输出**。
+//
 // ⛔ 不得包含：数据包载荷 / SMB 内容 / 凭据 / 文件内容（decisions/009 §8.3）。
 func FormatDetails(d Details) string {
 	var b strings.Builder
@@ -88,107 +127,115 @@ func FormatDetails(d Details) string {
 		}
 		fmt.Fprintf(&b, "%-11s : %s\n", k, v)
 	}
+	T := i18n.T
 
-	b.WriteString("===== anSMBwinRedirector 诊断详情 =====\n")
-	line("版本", fmt.Sprintf("%s (commit %s, build %s)", orDash(d.Version.Version), orDash(d.Version.Commit), orDash(d.Version.BuildTime)))
-	line("工具链", fmt.Sprintf("%s %s (%s)", orDash(d.Version.GoVersion), orDash(d.Version.Platform), orDash(d.Version.Release)))
-	line("系统", orDash(d.OS))
-	line("时间", d.Time.Format("2006-01-02 15:04:05 -07:00"))
+	b.WriteString(T("diag.header") + "\n")
+	line(T("diag.label.version"), fmt.Sprintf("%s (commit %s, build %s)", orDash(d.Version.Version), orDash(d.Version.Commit), orDash(d.Version.BuildTime)))
+	line(T("diag.label.toolchain"), fmt.Sprintf("%s %s (%s)", orDash(d.Version.GoVersion), orDash(d.Version.Platform), orDash(d.Version.Release)))
+	line(T("diag.label.os"), orDash(d.OS))
+	line(T("diag.label.time"), d.Time.Format("2006-01-02 15:04:05 -07:00"))
 	b.WriteString("\n")
 
-	b.WriteString("[全局状态]\n")
-	line("模式", d.Mode)
-	line("当前操作", d.Operation)
-	line("聚合", d.Aggregate)
+	b.WriteString(T("diag.section.global") + "\n")
+	line(T("diag.label.mode"), d.Mode)
+	line(T("diag.label.operation"), d.Operation)
+	line(T("diag.label.aggregate"), d.Aggregate)
 	b.WriteString("\n")
 
-	b.WriteString("[当前错误]\n")
+	b.WriteString(T("diag.section.errors") + "\n")
 	if len(d.Errors) == 0 {
-		b.WriteString("（无）\n")
+		b.WriteString(T("diag.none") + "\n")
 	} else {
 		for _, e := range d.Errors {
-			fmt.Fprintf(&b, "错误码      : %s\n", e.Code)
-			scope := string(e.Scope)
+			fmt.Fprintf(&b, "%-11s : %s\n", T("diag.label.code"), e.Code)
+			scope := ScopeText(e.Scope)
 			if e.Scope == ScopeGlobal {
 				ids := affectedOf(e)
 				if len(ids) > 0 {
-					scope = fmt.Sprintf("全局（影响 %d 个目标：%s）", len(ids), strings.Join(ids, ", "))
+					scope = fmt.Sprintf(T("diag.scope_global_affected"), len(ids), strings.Join(ids, ", "))
 				}
 			} else if e.TargetID != "" {
-				scope = fmt.Sprintf("%s（%s）", e.Scope, e.TargetID)
+				scope = fmt.Sprintf(T("diag.scope_target_fmt"), ScopeText(e.Scope), e.TargetID)
 			}
-			line("分类 / 范围", fmt.Sprintf("%s / %s", e.Category, scope))
-			line("摘要", e.Summary)
-			line("详情", e.Detail)
+			line(T("diag.label.category_scope"), fmt.Sprintf("%s / %s", CategoryText(e.Category), scope))
+			line(T("diag.label.summary"), e.Summary)
+			line(T("diag.label.detail"), e.Detail)
 			if e.Count > 1 {
-				line("次数", fmt.Sprintf("%d（首次 %s）", e.Count, e.FirstAt.Format("15:04:05")))
+				line(T("diag.label.count"), fmt.Sprintf(T("diag.count_fmt"), e.Count, e.FirstAt.Format("15:04:05")))
 			}
 			b.WriteString("\n")
 		}
 	}
 
-	b.WriteString("[配置]\n")
-	line("路径", d.Config.Path)
-	line("状态", fmt.Sprintf("%s   schema_version=%d   目标数=%d   备份: %s",
+	b.WriteString(T("diag.section.config") + "\n")
+	line(T("diag.label.path"), d.Config.Path)
+	line(T("diag.label.state"), fmt.Sprintf(T("diag.config_summary_fmt"),
 		orDash(d.Config.State), d.Config.SchemaVersion, d.Config.TargetCount, yesNo(d.Config.BackupExists)))
 	for _, v := range d.Config.Violations {
-		line("校验问题", v)
+		line(T("diag.label.violation"), v)
 	}
 	b.WriteString("\n")
 
-	b.WriteString("[WinDivert]\n")
+	b.WriteString(T("diag.section.windivert") + "\n")
 	if !d.WinDivert.Available {
 		// ⚠️ 必须把"**尚未做过只读检查**"与"检查失败"分开说。
 		// 本段在没有 Inspect 过时是零值（Available=false, Err=""），早先统一写成
 		// "不可用：-"，容易被误读成"WinDivert 不可用"且没有任何原因
 		// —— 这份文本是用户报问题时要附上的诊断（实机验证时发现）。
 		if d.WinDivert.Err == "" {
-			line("检查", "尚未检查（点「检查 WinDivert（只读）」后本段才有内容）")
+			line(T("diag.label.check"), T("diag.check.not_done"))
 		} else {
-			line("检查", "不可用："+d.WinDivert.Err)
+			line(T("diag.label.check"), T("diag.check.unavailable_prefix")+d.WinDivert.Err)
 		}
 	} else {
-		line("服务", fmt.Sprintf("%s   ImagePath->本程序 runtime: %s",
+		line(T("diag.label.service"), fmt.Sprintf(T("diag.service_fmt"),
 			yesNo(d.WinDivert.ServiceExists), yesNo(d.WinDivert.ImagePathIsOurs)))
-		line("服务路径", d.WinDivert.ServiceImagePath)
-		line("驱动", fmt.Sprintf("%s   驱动版本: %s", orDash(d.WinDivert.DriverState), orDash(d.WinDivert.DriverVersion)))
-		line("WinDivert 文件目录", fmt.Sprintf("%s   完整: %s", orDash(d.WinDivert.WinDivertDir), yesNo(d.WinDivert.RuntimeFilesOK)))
-		if len(d.WinDivert.Consumers) == 0 {
-			line("可观察使用者", "（无）")
+		line(T("diag.label.service_path"), d.WinDivert.ServiceImagePath)
+		line(T("diag.label.driver"), fmt.Sprintf(T("diag.driver_fmt"), orDash(d.WinDivert.DriverState),
+			runtimeVersionText(d.WinDivert.DriverRuntimeVersion)))
+		line(T("diag.label.windivert_dir"), fmt.Sprintf(T("diag.files_fmt"), orDash(d.WinDivert.WinDivertDir), yesNo(d.WinDivert.RuntimeFilesOK)))
+		for _, f := range d.WinDivert.Files {
+			line(T("diag.label.file"), fmt.Sprintf(T("diag.file_fmt"),
+				f.Name, orDash(f.Path), orDash(f.Version), fileHashText(f)))
+		}
+		if !d.WinDivert.ConsumersQueried {
+			line(T("diag.label.consumers"), T("diag.consumers_not_queried"))
+		} else if len(d.WinDivert.Consumers) == 0 {
+			line(T("diag.label.consumers"), T("diag.none"))
 		} else {
 			for _, c := range d.WinDivert.Consumers {
-				line("可观察使用者", fmt.Sprintf("PID=%d layer=%s 本程序=%s", c.PID, c.Layer, yesNo(c.IsOurs)))
+				line(T("diag.label.consumers"), fmt.Sprintf(T("diag.consumer_fmt"), c.PID, c.Layer, yesNo(c.IsOurs)))
 			}
 		}
-		fmt.Fprintf(&b, "⚠ %s\n", NoteText(NoteReflectConsumersUnprovable))
-		b.WriteString("   本程序不执行任何驱动卸载操作。\n")
+		fmt.Fprintf(&b, T("diag.warn_fmt")+"\n", NoteText(NoteReflectConsumersUnprovable))
+		b.WriteString(T("diag.no_uninstall") + "\n")
 	}
 	b.WriteString("\n")
 
-	b.WriteString("[目标]\n")
+	b.WriteString(T("diag.section.targets") + "\n")
 	if len(d.Targets) == 0 {
-		b.WriteString("（无）\n")
+		b.WriteString(T("diag.none") + "\n")
 	} else {
 		for i, t := range d.Targets {
-			fmt.Fprintf(&b, "%d) id=%s %s  运行态=%s  可达性=%s", i+1, t.ID, t.Endpoint, t.Runtime, t.Reachability)
+			fmt.Fprintf(&b, T("diag.target_line_fmt"), i+1, t.ID, t.Endpoint, t.Runtime, t.Reachability)
 			if t.LastChecked != "" {
 				fmt.Fprintf(&b, "(%s)", t.LastChecked)
 			}
 			b.WriteString("\n")
 			if t.Note != "" {
-				fmt.Fprintf(&b, "       提示: %s\n", t.Note)
+				fmt.Fprintf(&b, T("diag.target_note_fmt")+"\n", t.Note)
 			}
 		}
 	}
 	b.WriteString("\n")
 
-	b.WriteString("[最近事件]\n")
+	b.WriteString(T("diag.section.recent") + "\n")
 	if len(d.Recent) == 0 {
-		b.WriteString("（无）\n")
+		b.WriteString(T("diag.none") + "\n")
 	} else {
 		b.WriteString(FormatRecent(d.Recent))
 	}
-	b.WriteString("===== 完 =====\n")
+	b.WriteString(T("diag.footer") + "\n")
 	return b.String()
 }
 
@@ -210,7 +257,29 @@ func orDash(s string) string {
 
 func yesNo(b bool) string {
 	if b {
-		return "是"
+		return i18n.T("diag.yes")
 	}
-	return "否"
+	return i18n.T("diag.no")
+}
+
+// runtimeVersionText 渲染"运行时驱动版本"：空 ⇒ 明确写"未查询"（⛔ 不用文件/期望版本冒充）。
+func runtimeVersionText(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return i18n.T("diag.driver_runtime_not_queried")
+	}
+	return v
+}
+
+// fileHashText 渲染单个运行时文件的校验结论（诊断数据，原样）。
+func fileHashText(f RuntimeFile) string {
+	if f.Err != "" {
+		return f.Err
+	}
+	if f.Actual == "" || f.Expected == "" {
+		return i18n.T("diag.file_hash_unknown")
+	}
+	if f.OK {
+		return f.Actual
+	}
+	return f.Actual + " != " + f.Expected
 }

@@ -106,23 +106,28 @@ func (d *draft) isPersisted(id string) bool {
 }
 
 // add 追加一个新 Target（ID 在 GUI 侧生成，与 config.NewID 同源）。
-func (d *draft) add(ip netip.Addr, port uint16) error {
+func (d *draft) add(ip netip.Addr, port uint16, username, password string) error {
 	id, err := config.NewID()
 	if err != nil {
 		return err
 	}
-	d.targets = append(d.targets, model.Target{ID: id, AndroidIP: ip, AndroidPort: port})
+	d.targets = append(d.targets, model.Target{
+		ID: id, AndroidIP: ip, AndroidPort: port,
+		Username: username, Password: password,
+	})
 	// 新 ID 不可能同时处于待删除集合中。
 	delete(d.deleted, id)
 	return nil
 }
 
-// update 修改一个 Target 的 IP / 端口（**ID 不变** —— 006 §6.1：ID 是身份）。
-func (d *draft) update(id string, ip netip.Addr, port uint16) bool {
+// update 修改一个 Target 的 IP / 端口 / 凭据（**ID 不变** —— 006 §6.1：ID 是身份）。
+func (d *draft) update(id string, ip netip.Addr, port uint16, username, password string) bool {
 	for i := range d.targets {
 		if d.targets[i].ID == id {
 			d.targets[i].AndroidIP = ip
 			d.targets[i].AndroidPort = port
+			d.targets[i].Username = username
+			d.targets[i].Password = password
 			return true
 		}
 	}
@@ -131,7 +136,10 @@ func (d *draft) update(id string, ip netip.Addr, port uint16) bool {
 		for _, p := range d.persisted {
 			if p.ID == id {
 				delete(d.deleted, id)
-				d.targets = append(d.targets, model.Target{ID: id, AndroidIP: ip, AndroidPort: port})
+				d.targets = append(d.targets, model.Target{
+					ID: id, AndroidIP: ip, AndroidPort: port,
+					Username: username, Password: password,
+				})
 				return true
 			}
 		}

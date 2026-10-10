@@ -27,7 +27,7 @@ This file provides guidance to CodeBuddy Code when working with code in this rep
   - `internal/{app,controller,runtime,winvert,config,model,snapshot,diag,gui}`
 - **可用命令（在 `src/` 下）**：`go test ./...`、`gofmt -l ./cmd ./internal`、`go vet ./...`；
   Windows 交叉编译：`GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/ansmbwinredirector`。
-- **发布包**：`scripts/build-release.sh <version>` → `src/dist/release/`（6 个文件；`src/dist/` 被 `.gitignore` 忽略）。
+- **发布包**：`scripts/build-release.sh <version>` → `src/dist/release/`（**7 个文件**，含 `language.json`；`src/dist/` 被 `.gitignore` 忽略）。`config.json` **不随发布包分发**（首次运行/保存时由程序产生）。
 - ⚠️ **manifest 是必需的**：GUI 框架 `lxn/walk` 需要 Common-Controls v6 清单，缺失会导致窗口**完全建不出来**；
   它以内嵌资源 `cmd/ansmbwinredirector/rsrc_amd64.syso` 形式提供，由 `go tool rsrc`（版本锁在 `go.mod` 的 `tool` 指令）**可复现地**生成。
 - Go 工具链：Mac 上在 `~/sdk/go`（未改 shell profile，用 `export PATH="$HOME/sdk/go/bin:$PATH"`）。
@@ -56,7 +56,7 @@ Windows SMB Client
 
 根因：Android 应用无法绑定 < 1024 的特权端口，所以 anSMBserver 不能监听 445；而 Windows 原生 SMB 客户端只走 445，UNC 路径也无法指定端口。**端口可配不是为了避免与 Windows 445 冲突**，这是关键的因果方向，不要写反。
 
-**关键澄清（曾被误读，务必注意）**：445 与 Android 实际监听端口**都在 Android IP 上**，其中 **Android 真正监听的是那个可配置端口（默认 4450），不是 445**（Android 从不监听 445）。**该端口不得写死为 4450**——anSMBserver 的监听端口可修改。**每条规则只有两项可配**：`Android IP`（规则集合内**唯一**）+ `Android SMB Port`；Windows 目的端口 **TCP 445** 与协议 **TCP** 是**全局固定项**。**同一个 Android IP 不得存在两条规则**（否则两条出站 filter 会争抢 `AndroidIP:445`）。**Windows 侧不监听 445**，只有 SMB 客户端的动态临时源端口。本项目的正式术语是**透明 TCP 目的端口重定向**，**不是**"Windows 本机 445→4450 端口转发"，也**不是**任意 `FROM→TO` 的通用 NAT；因此 `netsh interface portproxy` 与普通用户态 TCP proxy **不适用**。
+**关键澄清（曾被误读，务必注意）**：445 与 Android 实际监听端口**都在 Android IP 上**，其中 **Android 真正监听的是那个可配置端口（默认 4450），不是 445**（Android 从不监听 445）。**该端口不得写死为 4450**——anSMBserver 的监听端口可修改。**每一条规则可配置的网络项是两个**：`Android IP`（规则集合内**唯一**）+ `Android SMB Port`；另有**凭据项**`用户名`/`密码`（**只用于 `连接` 时向 Windows 下发凭据，不参与匹配/改写**，见规则 12）；Windows 目的端口 **TCP 445** 与协议 **TCP** 是**全局固定项**。**同一个 Android IP 不得存在两条规则**（否则两条出站 filter 会争抢 `AndroidIP:445`）。**Windows 侧不监听 445**，只有 SMB 客户端的动态临时源端口。本项目的正式术语是**透明 TCP 目的端口重定向**，**不是**"Windows 本机 445→4450 端口转发"，也**不是**任意 `FROM→TO` 的通用 NAT；因此 `netsh interface portproxy` 与普通用户态 TCP proxy **不适用**。
 ⛔ **不得**把 `Windows TCP 445` 单独当成一条规则的**目标**；规则的 Windows 侧匹配目标是**派生**的 `AndroidIP:445`。
 
 **项目边界（不得越界）**：本项目管理的是"445 → Android 实际监听端口 的网络适配"，它**不应**演变成 SMB Server、SMB Client、Windows 版 anSMBserver、通用端口转发工具或通用 NAT，也不应变成自有 SMB 协议实现。
@@ -82,7 +82,9 @@ WinDivert 是**底层技术组件**，项目本身是产品；不要让仓库变
 - **是否需要 connection tracking**：映射本身**不需要**；但**无状态反滤波存在跨流误伤**（实测复现：直连 `AndroidIP:<AndroidPort>` 的返回包被误改成 445）。**已用最小 FlowTable（仅记录 OUT 建立的映射，IN 未命中即原样放行）修复**——此为**最小必要状态**，仍**不是**通用 NAT / connection tracking。
 - 多连接、混合流、正常/异常断开、重连、停止/重启基线——均已实测。
 - 运行所需 **Windows 权限**：需管理员（WinDivert 驱动加载）。
-- **WinDivert 驱动**：按需安装、不随进程退出卸载（`P0.1-C`）；显式清理需带两项安全检查（见 `AGENTS.md` §2.2）。
+- **WinDivert 驱动的生命周期由本程序负责**（`decisions/011`，**已取代** `P0.1-C` 时代的"普通退出不卸载 + 只读检查"模型）：
+  首次 `Start` 时**接管**（已存在服务 ⇒ 停止并删除 ⇒ 轮询到 1060 ⇒ 按当前程序目录安装 ⇒ 验证 `ImagePath`/hash）；
+  `Stop` 在 runtime 确认关闭后**停止并删除**服务；`Exit` 实测同样不会留下服务（见下条规则 13）。
 - WinDivert 的**许可证与再分发**要求（版本 2.2.2，见下）。
 
 ### 参考材料
@@ -110,7 +112,15 @@ WinDivert 是**底层技术组件**，项目本身是产品；不要让仓库变
 10. **测试以风险覆盖为目的**，不为了阶段流程重复执行完全相同的测试；已有结果可跨阶段复用。
 11. **GUI 先定信息架构再动代码**：v1 GUI 结构见 `decisions/003-gui-v1-information-architecture.md` 与 `decisions/008-v1-gui-interaction-contract.md`；**已实现的 GUI 在 `src/internal/gui` + `cmd/ansmbwinredirector`**，属已批准范围，**不要擅自重构或删除**（托盘 / 规则表 / Add·Edit·Delete / 多规则持久化 / 状态机等基础设施保留复用）。
     > ⚠️ 历史注（2026-10-07 收口审计）：本条原写"不要删除 `cmd/detour-gui` 的现有代码"——那是 **detour 参考实现**里的路径；本项目**并未复制 detour 的 GUI**，该路径在本仓库**不存在**。
-12. **多目标规则（v1 必须）**：一条规则 = `Android IP` + `Android SMB Port`（+ 稳定 ID）；**Android IP 在规则集合内唯一**，重复须在配置层拒绝。**多规则 ≠ 通用 NAT** —— 不得引入任意 FROM/TO、UDP、TCP/UDP 选择、代理。网络模型 → 规则模型 → 配置模型 → GUI 模型 → filter 模型 五层必须一致（核对表见 `decisions/003` §0）。
+12. **多目标规则（v1 必须）**：一条规则 = `Android IP`（规则集合内**唯一**，重复须在配置层拒绝）+ `Android SMB Port` + **`用户名`** + **`密码`**（+ 稳定 ID）；**同 IP 多账号不允许**。**多规则 ≠ 通用 NAT** —— 不得引入任意 FROM/TO、UDP、TCP/UDP 选择、代理。**凭据字段只用于 `连接` 时向 Windows 下发**（不参与匹配/改写；凭据身份 = `Android IP`），**本项目不实现 SMB 协议**。网络模型 → 规则模型 → 配置模型 → GUI 模型 → filter 模型 五层必须一致（修订后的核对表见 `decisions/003` 的 2026-10-08 修订记录）。
+13. **（2026-10-08 新增，`decisions/011`）WinDivert 生命周期由本程序负责**：**首次 `Start` 时接管**（已存在服务 ⇒ `sc stop` → 轮询到 **1060** → 按**当前程序目录**安装 → 验证 `ImagePath` 与 DLL/SYS 的 SHA-256）；⛔ **禁止静默复用**已有服务（实测：会继续加载旧路径的 `.sys`）；接管失败必须**显式失败**（`WINDIVERT_TAKEOVER_FAILED`），⛔ 不得 fallback；`Stop`/`Exit` 在"runtime 已确认关闭"之后**停止并删除** service；`1072` 属内部竞态（轮询等待，⛔ 不作用户可见错误）；⛔ **不提供 Force**；Debug 由 "Cleanup" 改为 **诊断 + Repair**。**程序启动阶段不碰 WinDivert。**
+14. **（2026-10-08 新增，`decisions/012`）`连接` 模型**：`Connect(TargetID)` = 下发 Windows 凭据（`cmdkey /add:<IP>`）→ `start \\<IP>\`；**「连接」按钮与表格右键菜单的 `Connect` 调用同一入口**；**单击 = 选中**（不进入编辑）；**双击 = 编辑**；**右键 = 上下文菜单（连接 / 编辑 / 删除）**；**Connect 要求该行已持久化且 runtime 正在运行**（⛔ 不自动 Start）；检测到该 IP 已有 Windows 凭据时**提示会覆盖**；⛔ 删除「连接测试」「重试启动」（`Failed` 的恢复入口 = **再次 `Start` / `Apply`**）。**v0.x 接受密码明文存 `config.json`**（明确取舍，**不宣称安全存储**），但密码 **⛔ 绝不进入** 日志/诊断/复制详情/错误信息/窗口标题/README。
+15. **（2026-10-08 新增，`decisions/013`）GUI 本地化**：用户可见文案一律来自**单文件 `language.json`**（EXE 同目录，UTF-8；`en` + `zh-CN`；默认 English；中文系统 ⇒ `zh-CN`；**启动时确定，⛔ 不做运行时切换**）；⛔ 不用 INI、不建 `locale/`、不引入第三方 i18n 库；⛔ 源码不得残留用户可见字面量；⛔ 错误码/JSON 字段名/服务名等**内部契约不本地化**；`language.json` 损坏/缺失 ⇒ **不阻止启动**（极少量内置 fallback）+ 记诊断；⛔ 它**不是**用户配置（无 `schema_version`、不做 hash 校验）。
+16. **（2026-10-09 新增，`decisions/011` §2.7 / §9.3 / 008 §15）`调试` 窗口**：入口 = 操作区 **「调试」** 按钮（**取代**「检查 WinDivert（只读）」）。内容 = **只读诊断**（程序目录 / 运行时文件**逐项** 路径 + 实际·期望 SHA-256 + **文件版本** / 服务存在性·状态 / `ImagePath` + 是否指向本程序目录）+ **`Repair / Reinstall WinDivert`** + **`重启 Windows Workstation 服务`** + 复制详情。规则：⛔ **无 Force、无裸卸载**（Repair **只能**走接管流程）；⛔ **GUI 不执行系统命令**（只回传意图，由 controller 执行）；**Repair 要求不在 `Running`**（否则 `REPAIR_REQUIRES_STOP`，非阻塞）；「重启 Workstation」文案 = **清理 SMB 客户端会话**（⛔ 不得表述为"修复网络"）+ 常驻影响提示 + 点击前确认；动作异步、`Operation = Debug`（与 Apply/Start/Stop/Connect **互斥**）。**⛔ 密码/密码长度绝不进入诊断、调试文本、复制详情、错误摘要、最近事件**（有自动化审计测试守住）。
+17. **（2026-10-09 新增，`decisions/011` §9.3 **D-1**）只读诊断 ⛔ 不得触达驱动**：`Inspect()`（以及调试窗口的打开/刷新/关闭）**禁止**任何 `divert.Open` / REFLECT 句柄 —— 实测它会把 WinDivert 驱动**装上并加载**（`sc query` 1060 → RUNNING），违反 007 §4.8 / T1-B。只允许：**SCM 查询 + 文件系统查询 + SHA-256 比对 + 文件版本资源**。
+    * 运行时驱动版本 / 可观察使用者**只能**靠 REFLECT 得到 ⇒ v1 只读路径**不查**，显示"**未查询**"。
+    * ⛔ 不得把"没查"显示成"（无）"；⛔ **不得**用文件版本或发布版本（如 `2.2.2`）冒充运行时版本。
+    * 驱动的**安装与加载只允许**发生在明确的 `Start` / 已批准的生命周期操作里。
 
 ### Agent 权限分级（`AGENTS.md` §13）
 

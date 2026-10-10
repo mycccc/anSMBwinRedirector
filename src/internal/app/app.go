@@ -15,6 +15,7 @@ import (
 	"ansmbwinhelper/internal/config"
 	"ansmbwinhelper/internal/controller"
 	"ansmbwinhelper/internal/diag"
+	"ansmbwinhelper/internal/i18n"
 	ansmbrt "ansmbwinhelper/internal/runtime"
 )
 
@@ -74,7 +75,7 @@ func Start(o Options) (*App, error) {
 		path, err = config.DefaultPath()
 		if err != nil {
 			sig.Release()
-			return nil, diag.Wrap(diag.CodeInternalError, err, "无法确定配置文件路径")
+			return nil, diag.Wrap(diag.CodeInternalError, err, "%s", i18n.T("app.config_path_failed"))
 		}
 	}
 	mgr := newManager()
@@ -84,6 +85,9 @@ func Start(o Options) (*App, error) {
 		Inspector: newInspector(),
 		Version:   o.Version,
 		OSInfo:    OSInfo(),
+		// 调试窗口的动作（decisions/011 §2.7）：修复 WinDivert / 重启 Workstation。
+		Repairer:  newRepairer(),
+		SystemOps: newSystemOps(),
 	})
 	ctl.LoadConfig()
 	return &App{Sig: sig, Ctl: ctl, Path: path, Mgr: mgr}, nil

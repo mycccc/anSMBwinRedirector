@@ -66,6 +66,13 @@ func (r *winRuntime) Start() error {
 		_ = out.Close() // L11 回滚
 		return err
 	}
+	// decisions/011 T-c：安装后必须确认 SCM 里的 ImagePath 指向**本程序目录**的 .sys。
+	// ⛔ 失败必须显式失败（不得继续使用来源不明的驱动），并回滚已打开的 handle（L11）。
+	if err := winvert.AfterOpen(); err != nil {
+		_ = in.Close()
+		_ = out.Close()
+		return err
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel

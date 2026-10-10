@@ -10,6 +10,7 @@ import (
 
 	"ansmbwinhelper/internal/controller"
 	"ansmbwinhelper/internal/diag"
+	"ansmbwinhelper/internal/i18n"
 )
 
 // SingleInstance 在非 Windows 平台上不存在。
@@ -21,7 +22,7 @@ func (s *SingleInstance) Release() {}
 // Start 在非 Windows 平台上立即失败。
 func startUnsupported() error {
 	return diag.Errorf(diag.CodePlatformUnsupported,
-		"anSMBwinRedirector 仅支持 Windows x64（当前平台 %s/%s）", runtime.GOOS, runtime.GOARCH)
+		i18n.T("app.platform_unsupported_detail"), runtime.GOOS, runtime.GOARCH)
 }
 
 func checkPlatform() error { return startUnsupported() }

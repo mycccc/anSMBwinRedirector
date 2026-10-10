@@ -71,47 +71,6 @@ func (s *Session) Close() error {
 	return s.h.Close()
 }
 
-// DriverVersion 通过一个**只查询、不安装驱动**的 REFLECT handle 读取驱动版本。
-//
-// 依据：WINDivert 官方对 WINDIVERT_FLAG_NO_INSTALL 的说明 ——
-// "This flag is useful for querying the WinDivert state using a WINDIVERT_LAYER_REFLECT handle."
-func DriverVersion() (string, error) {
-	h, err := divert.Open("true", divert.LayerReflect, divert.PriorityDefault,
-		divert.FlagSniff|divert.FlagRecvOnly|divert.FlagNoInstall)
-	if err != nil {
-		return "", MapError(err, "查询 WinDivert 驱动版本失败")
-	}
-	defer h.Close()
-
-	maj, err := h.GetParam(divert.VersionMajor)
-	if err != nil {
-		return "", err
-	}
-	min, err := h.GetParam(divert.VersionMinor)
-	if err != nil {
-		return "", err
-	}
-	return versionString(maj, min), nil
-}
-
-func versionString(maj, min uint64) string {
-	return itoa(uint32(maj>>16)) + "." + itoa(uint32(maj&0xffff)) + "." + itoa(uint32(min))
-}
-
-func itoa(v uint32) string {
-	if v == 0 {
-		return "0"
-	}
-	var b [12]byte
-	i := len(b)
-	for v > 0 {
-		i--
-		b[i] = byte('0' + v%10)
-		v /= 10
-	}
-	return string(b[i:])
-}
-
 // MapError 把 WinDivert 的系统错误映射到**封闭错误码表**（decisions/009 §2.2）。
 //
 // ⛔ 实现不得在别处临时造码。

@@ -22,28 +22,35 @@ type tableColumn struct {
 //
 // ⚠️ `运行态` 与 `可达性` 是**两列**（decisions/008 §0 对 003 的细化）：
 // 两者正交（007 §4.2 四维模型），合并成一列会让"运行中但 Android 没开"变成看起来像故障。
+//
+// ⚠️ `用户名` 列来自 **Draft**（decisions/012 §3.1：Target 含凭据字段）。
+// ⛔ **没有密码列**，也**不得**用任何可推断密码的占位（长度/掩码字符数）。
 var tableColumns = []tableColumn{
-	{Title: "Android IP", Width: 160},
-	{Title: "SMB 端口", Width: 90},
-	{Title: "运行态", Width: 150},
-	{Title: "可达性", Width: 150},
-	{Title: "说明", Width: 260},
+	{Title: "Android IP", Width: 150},
+	{Title: T("table.smb_port"), Width: 85},
+	{Title: T("table.username"), Width: 110},
+	{Title: T("table.runtime"), Width: 140},
+	{Title: T("table.reachability"), Width: 140},
+	{Title: T("table.note"), Width: 240},
 }
 
 // guiRow 是表格的一行（**渲染专用**）。
 //
 // 来源（decisions/008 §3.3）—— 这张表是"渲染来源"的权威落点：
 //
-//	ip / port               ← GUI Draft（草稿）
+//	ip / port / username      ← GUI Draft（草稿）
 //	runtime / rtErr         ← Snapshot.Runtime
 //	reach / lastChecked     ← Snapshot.Reach
 //	pendingDelete / unsaved / persisted / note ← GUI 派生（**不是** Runtime 状态）
+//
+// ⛔ 这里**不携带密码**（哪怕是掩码）—— 密码不属于渲染数据（decisions/012 §3.3）。
 type guiRow struct {
 	id string
 
 	// --- 来自 Draft ---
-	ip   string
-	port uint16
+	ip       string
+	port     uint16
+	username string
 
 	// --- 来自 Snapshot（Runtime，实际生效）---
 	runtime snapshot.RuntimeState
@@ -66,15 +73,15 @@ type guiRow struct {
 func (r guiRow) runtimeDisplay() string {
 	switch r.runtime {
 	case snapshot.RTRunning:
-		return "✓ 运行中"
+		return T("state.running")
 	case snapshot.RTStarting:
-		return "◐ 启动中"
+		return T("state.starting")
 	case snapshot.RTStopping:
-		return "◐ 停止中"
+		return T("state.stopping")
 	case snapshot.RTFailed:
-		return "✕ 启动失败"
+		return T("state.failed")
 	default:
-		return "○ 未运行"
+		return T("state.not_running")
 	}
 }
 
@@ -94,11 +101,11 @@ func (r guiRow) noteDisplay() string {
 	s := r.note
 	switch {
 	case r.pendingDelete:
-		s = joinNote(s, "待删除（应用后生效）")
+		s = joinNote(s, T("row.pending_delete"))
 	case !r.persisted:
-		s = joinNote(s, "新增（未保存）")
+		s = joinNote(s, T("row.unsaved_new"))
 	case r.unsaved:
-		s = joinNote(s, "已修改（未保存）")
+		s = joinNote(s, T("row.unsaved_modified"))
 	}
 	return s
 }
@@ -131,8 +138,10 @@ func (m *targetModel) Value(row, col int) interface{} {
 	case 1:
 		return fmt.Sprintf("%d", r.port)
 	case 2:
-		return r.runtimeDisplay()
+		return r.username
 	case 3:
+		return r.runtimeDisplay()
+	case 4:
 		return r.reachDisplay()
 	default:
 		return r.noteDisplay()
@@ -151,14 +160,14 @@ func (m *targetModel) StyleCell(style *walk.CellStyle) {
 		return
 	}
 	switch style.Col() {
-	case 2: // 运行态
+	case 3: // 运行态
 		switch r.runtime {
 		case snapshot.RTRunning:
 			style.TextColor = walk.RGB(0, 120, 0)
 		case snapshot.RTFailed:
 			style.TextColor = walk.RGB(176, 0, 0)
 		}
-	case 3: // 可达性：不可达**不**着色（它不是错误）
+	case 4: // 可达性：不可达**不**着色（它不是错误）
 	}
 }
 

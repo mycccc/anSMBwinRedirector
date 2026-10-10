@@ -24,6 +24,12 @@ func DescribeWinDivertFiles() string { return "(非 Windows 平台)" }
 // VerifyWinDivertFiles 在非 Windows 平台不可用。
 func VerifyWinDivertFiles() (bool, error) { return false, nil }
 
+// RuntimeFileInfos 在非 Windows 平台返回空（诊断用）。
+func RuntimeFileInfos() []diag.RuntimeFile { return nil }
+
+// FileVersion 在非 Windows 平台不可用。
+func FileVersion(string) (string, error) { return "", platformErr() }
+
 // Inspector 在非 Windows 平台报告不可用。
 type Inspector struct{}
 
