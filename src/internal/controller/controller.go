@@ -149,6 +149,25 @@ func (c *Controller) LoadConfig() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 加载**之前**的两个动作（decisions/006 §4.2 修订）：写探测 + 旧路径一次性迁移。
+	// ⚠️ 它们**会写盘**（探测文件；迁移时写新配置），因此不放在 `Load()` 里。
+	prep := c.opts.Store.Prepare()
+	for _, n := range prep.Notes {
+		c.ring.Info(diag.SrcStartup, "%s", n)
+	}
+	if prep.Unavailable {
+		// ⛔ 不 fallback 到旧路径、⛔ 不以空配置继续（decisions/006 §6.10）。
+		c.persisted = nil
+		c.cfgState = config.StateUnavailable
+		c.cfgViolations = nil
+		c.cfgCode = prep.Code
+		c.cfgDetail = prep.Detail
+		c.agg.Add(diag.New(prep.Code, diag.SrcStartup, prep.Detail, ""))
+		c.ring.Error(diag.SrcStartup, "配置不可用（%s）：%s", prep.Code, prep.Detail)
+		c.publishLocked()
+		return
+	}
+
 	r := c.opts.Store.Load()
 	switch r.State {
 	case config.StateLoaded:

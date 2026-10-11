@@ -1,6 +1,8 @@
 // Package config 是 v1 的配置持久化层，严格对应 decisions/006（+ decisions/012 的 schema v2 修订）。
 //
-// 路径：%APPDATA%\anSMBwinRedirector\config.json（经由 os.UserConfigDir()）
+// 路径：**`<可执行文件所在目录>\config.json`**（decisions/006 §4.2 的 **2026-10-10 修订**；
+// 与 `WinDivert.dll` / `WinDivert64.sys` / `language.json` 同一约定）。
+// 备份与临时文件同在该目录（`config.json.bak` / `config.json.tmp`）。
 //
 //	{
 //	  "schema_version": 2,
@@ -19,6 +21,9 @@
 //   - 缺 id ⇒ 仅在**内存**生成；**任何读取路径都不得产生磁盘写入**
 //   - 重复 IP / 重复 ID / 非法字段 ⇒ 整份配置不可用，**列出全部违规项**，且不做部分加载
 //   - 写入：同目录临时文件 + Windows 文件替换语义（**不声称原子性**）+ 保留一份 .bak
+//
+// 加载前的两个**会写盘**的动作（写探测 / 旧路径一次性迁移）在 `Prepare()`，⛔ 不在 `Load()`：
+//   - 目录不可写 ⇒ `ConfigUnavailable`，⛔ **不** fallback 到旧的 `%APPDATA%` 路径
 //
 // ⚠️ `config.json` 与其 `.bak` **同属敏感文件**（含明文密码，decisions/012 §3.3）。
 // 密码 ⛔ 绝不进入日志 / 诊断 / 复制详情 / 错误信息。
@@ -319,18 +324,24 @@ func Marshal(ts []model.Target) ([]byte, error) {
 // Store 负责配置文件的读与写。
 type Store struct {
 	path string
+	// legacyPath 是**历史的** `%APPDATA%` 配置路径（decisions/006 §4.2 修订）。
+	// 为空 ⇒ 不做一次性迁移（例如 devconsole 显式指定路径时）。
+	legacyPath string
 }
 
-// DefaultDir 返回 %APPDATA%\anSMBwinRedirector。
+// DefaultDir 返回**可执行文件所在目录**（decisions/006 §4.2 的 2026-10-10 修订）。
+//
+// 与 `internal/i18n`（`language.json`）和 `winvert`（`WinDivert.dll`/`.sys`）同一约定：
+// 程序的所有运行期文件都与 exe 同目录 ⇒ 目录整体可移动/便携。
 func DefaultDir() (string, error) {
-	base, err := os.UserConfigDir()
+	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, AppDirName), nil
+	return filepath.Dir(exe), nil
 }
 
-// DefaultPath 返回 %APPDATA%\anSMBwinRedirector\config.json。
+// DefaultPath 返回 `<可执行文件所在目录>\config.json`。
 func DefaultPath() (string, error) {
 	dir, err := DefaultDir()
 	if err != nil {
@@ -341,6 +352,17 @@ func DefaultPath() (string, error) {
 
 // NewStore 创建 Store。
 func NewStore(path string) *Store { return &Store{path: path} }
+
+// SetLegacyPath 设置旧位置配置路径，用于**一次性迁移**（decisions/006 §4.2 修订）。
+//
+// ⚠️ 只在"使用产品默认路径"时设置；显式指定配置路径（如开发入口）时⛔ 不应迁移。
+func (s *Store) SetLegacyPath(p string) *Store {
+	s.legacyPath = p
+	return s
+}
+
+// LegacyPathFor 返回当前 Store 绑定的旧位置路径（诊断用；无则空）。
+func (s *Store) LegacyPathFor() string { return s.legacyPath }
 
 // Path 返回配置文件路径。
 func (s *Store) Path() string { return s.path }

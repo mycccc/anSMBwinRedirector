@@ -70,17 +70,28 @@ func Start(o Options) (*App, error) {
 	}
 
 	// P3 配置。
+	//
+	// 路径 = **可执行文件所在目录**（decisions/006 §4.2 的 2026-10-10 修订）；
+	// 显式指定 `ConfigPath` 时（开发入口）不参与旧路径迁移。
 	path := o.ConfigPath
-	if path == "" {
+	useDefault := path == ""
+	if useDefault {
 		path, err = config.DefaultPath()
 		if err != nil {
 			sig.Release()
 			return nil, diag.Wrap(diag.CodeInternalError, err, "%s", i18n.T("app.config_path_failed"))
 		}
 	}
+	st := config.NewStore(path)
+	if useDefault {
+		// 旧位置（%APPDATA%）仅作为**一次性迁移**的来源；⛔ 不是 fallback。
+		if lp, lerr := config.LegacyPath(); lerr == nil {
+			st.SetLegacyPath(lp)
+		}
+	}
 	mgr := newManager()
 	ctl := controller.New(controller.Options{
-		Store:     config.NewStore(path),
+		Store:     st,
 		Manager:   mgr,
 		Inspector: newInspector(),
 		Version:   o.Version,
