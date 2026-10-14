@@ -231,7 +231,7 @@ In the **Config Unavailable** state the program:
 | Action | What it does |
 | --- | --- |
 | **Copy config path** | Puts the **path** of `config.json` on the clipboard. ⛔ It does **not** open the file or a folder — you then open that path **yourself** in a text editor to inspect or repair it |
-| **Restart with empty config** | Starts over with an empty configuration **without deleting anything**: it **renames** the unusable `config.json` to `config.json.corrupt-<timestamp>` (content fully preserved) and continues with an empty config. ⛔ This action is **not offered** when the file was written by a newer `schema_version` (to prevent an accidental downgrade from destroying data). The rename itself still needs a writable directory |
+| **Restart with empty config** | Starts over with an empty configuration **without deleting anything**: it **renames** the unusable `config.json` to `config.json.corrupt-<timestamp>` (content fully preserved) and continues with an empty config. Asks for confirmation first; cancelling changes nothing. When the file was written by a newer `schema_version`, the button is **still shown but disabled** (to prevent an accidental downgrade from destroying data). The rename itself still needs a writable directory |
 
 **Write probe at startup**: on every start the program performs one **lightweight write probe** in the
 config directory (= the exe's directory) — it creates a **dedicated, uniquely named** probe file
@@ -252,7 +252,7 @@ config directory (= the exe's directory) — it creates a **dedicated, uniquely 
 | `CONFIG_IO_ERROR` (directory not writable / insufficient permissions) | Make the program directory writable (or move it to a writable directory); e.g. **avoid** `C:\Program Files\` with default permissions |
 | `CONFIG_IO_ERROR` (probe file cannot be cleaned up) | Check whether security software is locking the directory; this is also treated as "not writable" |
 | `CONFIG_PARSE_ERROR` / `CONFIG_VALIDATION_FAILED` | Use "Copy config path" to get the path, then open that path **yourself** in a text editor and repair it by hand; the UI lists **all** violations |
-| `CONFIG_SCHEMA_UNSUPPORTED` (file written by a newer version) | ⛔ The program deliberately does **not** offer "restart with an empty config"; use the newer version instead (to prevent accidental downgrade damage) |
+| `CONFIG_SCHEMA_UNSUPPORTED` (file written by a newer version) | "Restart with empty config" stays **disabled** on purpose; use the newer version instead (to prevent accidental downgrade damage) |
 
 ### 4.5 Config Unavailable is **not** the same as "migration failed"
 
