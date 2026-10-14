@@ -1,181 +1,212 @@
 # anSMBwinRedirector
 
-Windows 侧的**透明 TCP 目的端口重定向**小工具，让 Windows 原生 SMB 客户端 / Windows 资源管理器
-能够访问运行在 Android 上、监听**非标准端口**（默认 `4450`，可配置）的 `anSMBserver`。
+A small Windows utility that performs **transparent TCP destination-port rewriting**, so that the
+native Windows SMB client / File Explorer can reach an `anSMBserver` instance running on Android
+that listens on a **non-privileged port** (default `4450`, configurable).
 
 ```text
-Windows 资源管理器 / 原生 SMB 客户端
-        │  TCP: <动态临时端口> → AndroidIP:445
+Windows Explorer / native SMB client
+        │  TCP: <ephemeral port> → AndroidIP:445
         ▼
 anSMBwinRedirector
-        │  透明改写「目的端口」：AndroidIP:445 → AndroidIP:<Android SMB 端口>
+        │  transparently rewrites the DESTINATION PORT: AndroidIP:445 → AndroidIP:<Android SMB port>
         ▼
-Android anSMBserver（实际监听该可配置端口）
-        │  TCP: AndroidIP:<端口> → Windows 动态临时端口
+Android anSMBserver (actually listening on that configurable port)
+        │  TCP: AndroidIP:<port> → Windows ephemeral port
         ▼
 anSMBwinRedirector
-        │  透明恢复「源端口」：<端口> → 445
+        │  transparently restores the SOURCE PORT: <port> → 445
         ▼
-Windows 资源管理器 / 原生 SMB 客户端
+Windows Explorer / native SMB client
 ```
 
-**为什么需要它**：Android 应用无法绑定 < 1024 的特权端口，所以 `anSMBserver` 不能监听 `445`；
-而 Windows 原生 SMB 客户端只走 `445`，UNC 路径也没有指定端口的机制。
-（注意因果方向：`anSMBserver` 用非标准端口是 **Android 平台限制**的结果，
-**不是**为了避免与 Windows 的 `445` 冲突。）
+**Why this exists**: Android apps cannot bind privileged ports below 1024, so `anSMBserver` cannot
+listen on `445`; the native Windows SMB client only talks to `445`, and UNC paths offer no way to
+specify a port. (Note the direction of causation: `anSMBserver` using a non-standard port is a
+consequence of an **Android platform limitation**, **not** a way to avoid clashing with
+Windows' own `445`.)
+
+> Chinese documentation: [`README.zh-CN.md`](README.zh-CN.md).
 
 ---
 
-## 1. 运行要求
+## 1. Requirements
 
-| 项 | 要求 |
+| Item | Requirement |
 | --- | --- |
-| 操作系统 | **Windows x64（amd64）** —— 仅此一种 |
-| 权限 | **管理员**（加载 WinDivert 驱动需要） |
-| 同目录文件 | **`WinDivert.dll` 与 `WinDivert64.sys` 必须与 exe 同目录**，缺一不可（见 §4） |
-| 网络 | 能访问目标 Android 设备的 IP |
+| OS | **Windows x64 (amd64)** — nothing else |
+| Privileges | **Administrator** (needed to load the WinDivert driver) |
+| Same-directory files | **`WinDivert.dll` and `WinDivert64.sys` must sit next to the exe**; both are required (see §4) |
+| Working directory | **The directory containing the exe must be writable** (the config, its backup and the temp file are written there — see §6 / §7) |
+| Network | Must be able to reach the target Android device's IP |
 
-> ⛔ **不支持 Windows on ARM64**：amd64 程序虽可在仿真下运行，但内核驱动必须是 ARM64，
-> 本程序携带的 amd64 `WinDivert64.sys` 无法加载。程序会在启动最前**显式拒绝**并说明原因。
-> ⛔ 不支持 32 位 Windows（amd64 可执行文件无法启动）。
+> ⛔ **Windows on ARM64 is not supported**: an amd64 binary may run under emulation, but a kernel
+> driver must be ARM64, so the bundled amd64 `WinDivert64.sys` cannot load. The program **refuses to
+> start** with an explicit explanation before doing anything else.
+> ⛔ 32-bit Windows is not supported (an amd64 executable will not start).
 
 ---
 
-## 2. 安装与目录结构
+## 2. Installation and layout
 
-**解压即用，没有安装器。** 把发布包解压到任意目录（建议**非只读**、且路径不含特殊字符）：
+**Unzip and run — there is no installer.** Extract the release package into any **writable** directory:
 
 ```text
-anSMBwinRedirector-<版本>-win-x64/
+anSMBwinRedirector-<version>-win-x64/
 ├── anSMBwinRedirector.exe
-├── WinDivert.dll            ← 第三方（WinDivert 2.2.2-A），必须与 exe 同目录
-├── WinDivert64.sys          ← 第三方，必须与 exe 同目录
-├── language.json            ← 界面文案（`en` + `zh-CN`；UTF-8）
-├── LICENSE                  ← 本项目 GPLv3 全文
-├── THIRD_PARTY_NOTICES.md   ← 第三方组件与许可全文
-└── README.md                ← 本文件
+├── WinDivert.dll            ← third-party (WinDivert 2.2.2-A); must sit next to the exe
+├── WinDivert64.sys          ← third-party; must sit next to the exe
+├── language.json            ← UI strings (`en` + `zh-CN`; UTF-8)
+├── LICENSE                  ← full GPLv3 text for this project
+├── THIRD_PARTY_NOTICES.md   ← third-party components and their full licenses
+└── README.md                ← this file
 ```
 
-程序**不写安装目录**，也**不写 `%PROGRAMDATA%`**。唯一的持久化文件是配置文件（见 §6）。
+- The release package contains **exactly these 7 files** and **no `config.json`** (that is runtime
+  data, created on your first "Apply Changes" — see §3/§6).
+- The Chinese documentation `README.zh-CN.md` lives **only in the source repository** and is not shipped
+  in the release package (the package is fixed at the 7 files listed above).
+- The program writes **nothing outside its own directory**, and **never writes `%PROGRAMDATA%`**.
+- ⚠️ **Do not put it in a directory you cannot write to** (e.g. `C:\Program Files\...` with default
+  permissions): the first save would fail, and the program treats "config directory not writable" as
+  **Config Unavailable** (see §7).
+- The directory is **self-contained**: if you move or rename it, the configuration and the WinDivert
+  files move with it (see the upgrade notes in §5).
 
 ---
 
-## 3. 首次运行
+## 3. First run
 
-1. 右键 `anSMBwinRedirector.exe` → **以管理员身份运行**。
-2. 主窗口出现（同时出现托盘图标）。
-3. 点「添加」→ 填写目标：
-   - **Android IP**：设备的 IPv4 地址（例如 `192.168.1.100`）；
-   - **Android SMB 端口**：`anSMBserver` 实际监听的端口（默认 `4450`，可配置）；
-   - **用户名 / 密码**（可选）：填了就在连接前写入 Windows 凭据（`cmdkey`）。留空则不改动系统凭据。
-     *用户名与密码必须同时填写或同时留空。*
-     *同一个 Android IP 只能有一条规则。*
-4. 点「应用更改」保存。
-5. 点「启动」。
-6. 需要打开该服务器的共享时：**选中该行后点「连接」**（或在该行上点右键 → 连接）。
-   程序会先写凭据（若配置了），再用系统默认方式打开 `\\<Android IP>\`。
+1. Right-click `anSMBwinRedirector.exe` → **Run as administrator**.
+2. The main window appears (along with a tray icon). **No configuration file is created yet** —
+   the first start is an empty configuration; `config.json` appears in the **exe's directory** only
+   when you first press "Apply Changes".
+3. Press "Add" and fill in a target:
+   - **Android IP**: the device's IPv4 address (e.g. `192.168.1.100`);
+   - **Android SMB port**: the port `anSMBserver` actually listens on (default `4450`, configurable);
+   - **username / password** (optional): if entered, they are written to the Windows credential store
+     (`cmdkey`) before connecting. If left empty, existing system credentials are left untouched.
+     *Username and password must either both be filled in or both be empty.*
+   - *One Android IP can have only one rule.*
+4. Press "Apply Changes" → `config.json` is created **next to the exe** (the previous version is kept
+   as `config.json.bak`).
+5. Press "Start".
+6. To open that server's shares: **select the row and press "Connect"** (or right-click the row →
+   Connect). The program first writes the credentials (if configured) and then opens `\\<Android IP>\`
+   through the system default handler.
 
-之后在资源管理器里访问 `\\<Android IP>\<共享名>` 即可 —— Windows 侧仍然走 `445`，
-程序在背后把它重定向到 `<Android IP>:<你配置的端口>`。
+After that you can browse `\\<Android IP>\<share>` in File Explorer — Windows still uses `445`, and the
+program rewrites it to `<Android IP>:<your configured port>` behind the scenes.
 
-> 程序不会修改系统代理，也不会使用 `netsh portproxy`。
+> The program does not modify the system proxy and does not use `netsh portproxy`.
 
 ---
 
-## 4. 关于 WinDivert（**请务必读**）
+## 4. About WinDivert (**please read**)
 
-本程序通过网络层拦截/改写数据包来实现重定向，这依赖第三方组件 **WinDivert 2.2.2-A**。
+The redirect works by intercepting and rewriting packets at the network layer, which relies on the
+third-party component **WinDivert 2.2.2-A**.
 
-- 它由 **`WinDivert.dll` + `WinDivert64.sys`** 两个文件组成，**必须与 `anSMBwinRedirector.exe` 放在同一目录**。
-- 程序启动时（以及每次「启动」）会校验这两个文件的 **SHA-256**：
-  - **缺失** → 报 `RUNTIME_FILE_MISSING`（含完整路径）；
-  - **内容被改动** → 报 `RUNTIME_FILE_CORRUPT`（同时给出**实际**与**期望**的 SHA-256）。
-  - ⛔ 无论哪种情况，程序**只报告**：**不会**自动覆盖、**不会**重新下载、**不会**删除你的文件。
-    你可以自行把正确的文件放回去，然后点「重试启动」。
-- 首次点「启动」时，WinDivert 驱动会**按需安装并加载**（这会创建一个 Windows 服务，需要管理员权限）。
-  安装/加载本身由 WinDivert 完成；**但"接管"（把已存在的服务停掉并删除）由本程序负责** —— 见 §4.1。
+- It consists of **`WinDivert.dll` + `WinDivert64.sys`**, which **must be placed in the same directory
+  as `anSMBwinRedirector.exe`**.
+- At startup (and on every "Start") the program verifies the **SHA-256** of both files:
+  - **missing** → `RUNTIME_FILE_MISSING` (with the full path);
+  - **modified** → `RUNTIME_FILE_CORRUPT` (reporting both the **actual** and the **expected** SHA-256).
+  - ⛔ In either case the program **only reports**: it never overwrites, never re-downloads and never
+    deletes your files.
+- On the first "Start", the WinDivert driver is **installed and loaded on demand** (this creates a
+  Windows service and requires administrator rights). The install/load itself is done by WinDivert;
+  **the "takeover" (stopping and deleting an existing service) is done by this program** — see §4.1.
 
-### 4.1 WinDivert 服务由本程序负责（接管 / 停止 / 退出）
+### 4.1 This program owns the WinDivert service lifecycle (Start / Stop / Exit)
 
-**点「启动」时（接管）**：如果系统里**已经存在**一个 `WinDivert` 服务（可能是别的工具或旧版本留下的），
-本程序会先把它**停止并删除**、确认服务消失（`sc query` 返回 **1060**）之后，才让 WinDivert
-**从本程序所在目录**安装 `WinDivert64.sys`，并校验服务实际加载的 `ImagePath` 是否指向本程序目录。
+**On "Start" (takeover)**: if a `WinDivert` service **already exists** (left behind by another tool or
+an older version), the program first **stops and deletes** it, waits until it is gone (`sc query`
+returns **1060**), and only then lets WinDivert install `WinDivert64.sys` **from this program's own
+directory**, verifying that the service's actual `ImagePath` points at this directory.
 
-> ⛔ 本程序**不重用**已存在的 WinDivert 服务 —— 实测那样会继续加载**旧路径的 `.sys`**。
-> 接管失败时会**明确报错**（`WINDIVERT_TAKEOVER_FAILED`），**不会**退回使用旧服务。
+> ⛔ The program **never reuses** an existing WinDivert service — tests showed that doing so keeps
+> loading a `.sys` from the **old path**. If the takeover fails it reports an explicit error
+> (`WINDIVERT_TAKEOVER_FAILED`) and **never** falls back to the old service.
 
-| 动作 | 对 WinDivert **服务**的影响 | 对 `WinDivert.dll` / `WinDivert64.sys` **文件**的影响 |
+| Action | Effect on the WinDivert **service** | Effect on the `WinDivert.dll` / `WinDivert64.sys` **files** |
 | --- | --- | --- |
-| **启动** | 已存在 ⇒ 先停止并**删除**，再从本程序目录安装 | **不**修改（只在缺失/被改动时报错，见上） |
-| **停止** | 停止并**删除**服务（`sc query` 回到 1060），并等待 `.sys` 不再被占用 | **不**删除 |
-| **退出** | 实测：若当时正在运行，退出后 `sc query WinDivert` 为 **1060（未安装）** | **不**删除 |
-| **重启系统** | ⛔ **不会**因此自动删除服务注册 | ⛔ **不会**因此自动删除这两个文件 |
+| **Start** | if present ⇒ stop and **delete** it, then install from this program's directory | **not** modified (only reported when missing/modified) |
+| **Stop** | stop and **delete** the service (`sc query` back to 1060), then wait until `.sys` is no longer locked | **not** deleted |
+| **Exit** | measured: if it was running, after exit `sc query WinDivert` is **1060 (not installed)** | **not** deleted |
+| **OS reboot** | ⛔ does **not** delete the service registration | ⛔ does **not** delete those two files |
 
-> ⚠️ **不要把"重启"当成"清理"**：重启只让**当前加载的驱动实例**随系统关闭而退出
-> （所以它可以解除驱动版本冲突），但**不会**删除服务注册，也**不会**删除那两个文件
-> （它们只是你解压出来的普通文件）。
+> ⚠️ **Do not confuse "reboot" with "cleanup"**: a reboot only makes the **currently loaded driver
+> instance** go away with the system shutdown (which is why it can resolve driver-version conflicts);
+> it neither deletes the service registration nor the two files (they are just ordinary files you
+> extracted).
 
-⛔ 本程序**不提供**"强制清理 / 绕过接管的裸卸载"入口，也**从不删除**你的
-`WinDivert.dll` / `WinDivert64.sys`。若你想手工清理别处留下的残留注册项，
-请按 WinDivert 官方说明自行处理（那不属于本程序的功能）。
+⛔ The program offers **no** "force cleanup / bypass-the-takeover" uninstall entry point and **never
+deletes** your `WinDivert.dll` / `WinDivert64.sys`. If you want to clean up a leftover registration
+created elsewhere, do it yourself following WinDivert's official instructions (that is not a feature
+of this program).
 
-### 4.2 「调试」窗口
+### 4.2 The "Debug" window
 
-主窗口的「调试」按钮打开一个**诊断**窗口，里面有三件事：
+The "Debug" button opens a **diagnostics** window with three parts:
 
-1. **只读诊断**（不修改任何东西）：程序目录；`WinDivert.dll` / `WinDivert64.sys` 的路径、
-   **文件版本**与**实际 / 期望 SHA-256**；WinDivert 服务是否存在、当前状态、`ImagePath`
-   及其是否指向本程序目录；**运行时驱动版本**（只读诊断**不打开驱动句柄**，因此这一项显示为"未查询"）。
-2. **`修复 / 重新安装 WinDivert`**：按 §4.1 **同一套接管流程**移除已存在的服务注册，
-   并重新校验本程序目录的两个运行时文件。**它不加载驱动**（驱动仍由下一次「启动」加载），
-   ⛔ 不修改任何文件。重定向运行中时该按钮不可用（请先「停止」）。
-3. **`重启 Windows Workstation 服务`**：用途是**清理 Windows SMB 客户端会话状态**，
-   ⛔ **不是**"修复网络"，也**不保证**解决连接问题（已实测）。点击前会二次确认；
-   它会中断当前已有的 SMB 连接。
+1. **Read-only diagnostics** (modifies nothing): the program directory; the paths, **file versions**
+   and **actual / expected SHA-256** of `WinDivert.dll` / `WinDivert64.sys`; whether the WinDivert
+   service exists, its current state, its `ImagePath` and whether it points at this program's
+   directory; the **runtime driver version** (read-only diagnostics **do not open a driver handle**,
+   so this item reads "not queried").
+2. **`Repair / Reinstall WinDivert`**: removes an existing service registration through the **same
+   takeover flow** as §4.1 and re-verifies the two runtime files in this program's directory.
+   **It does not load the driver** (the driver is still loaded by the next "Start") and ⛔ does not
+   modify any file. The button is disabled while the redirect is running (press "Stop" first).
+3. **`Restart the Windows Workstation service`**: its purpose is to **clear the Windows SMB client
+   session state**. ⛔ It is **not** a "network repair" and does **not** guarantee a fix (measured).
+   It asks for confirmation first and interrupts existing SMB connections.
 
-> ⚠️ 诚实声明：`REFLECT` 层的 WinDivert 使用者**无法枚举**，因此**无法证明**系统中不存在其他 WinDivert 使用者。
+> ⚠️ Honest statement: WinDivert consumers on the `REFLECT` layer **cannot be enumerated**, so the
+> program **cannot prove** that no other WinDivert consumer exists on the system.
 
 ---
 
-## 5. 界面说明
+## 5. Upgrading from an older version (legacy config migration)
 
-**主窗口**
+Older versions kept the configuration at `%APPDATA%\anSMBwinRedirector\config.json`. **It now lives
+next to the exe** (see §6). On upgrade the program performs a **one-time migration**:
 
-| 操作 | 说明 |
+| Situation | What the program does |
 | --- | --- |
-| 添加 / 编辑 / 删除 | 只修改**草稿**；「编辑」可填 IP / 端口 / 用户名 / 密码；删除后该行显示为「待删除」，此时选中它，「删除」按钮会变成「撤销删除」 |
-| **应用更改** | **唯一**的提交入口：校验 → 写盘（并生成 `.bak`）→ 生效。未保存时状态行显示 `⚠ 有未保存更改` |
-| 启动 / 停止 | 启动/停止所有目标的重定向（「启动」会先接管 WinDivert 服务，见 §4.1） |
-| **连接** | 打开该目标的共享：先写入 Windows 凭据（若该目标配置了用户名/密码）→ 用系统默认方式打开 `\\<Android IP>\`。**要求该目标正在运行**（⛔ 不会自动「启动」）。若该 IP 在 Windows 里已有凭据，会**先确认是否替换** |
-| 调试 | 见 §4.2 |
-| 复制详情 / 复制配置路径 | 把诊断信息 / 配置文件路径放进剪贴板 |
-| 退出 | 若有未保存更改，会问「保存并应用 / 放弃 / 取消」 |
+| New location has **no** config, old location has a **usable** one | Read and validate the old config → **safely write** it to the new location → **read it back and verify** → **rename** the old file to `config.json.migrated-<timestamp>` (content fully preserved, ⛔ never deleted) |
+| New location **already has** a config | The **new location wins**; the old file is **left untouched** (a note is added to "Recent events") |
+| The old config is **unusable** (parse/validation failure) | ⛔ **no migration, no rename**; the old file is left as-is; the program logs a diagnosable note and starts normally with an empty configuration |
+| **Any step** of the migration fails | ⛔ the old file stays **byte-for-byte identical**, and the program does **not** report success (the new location may still be an empty config) |
 
-**列表操作**：**单击 = 选中**（不会打开编辑框）；**双击 = 编辑**；**右键 = 菜单（连接 / 编辑 / 删除）**。
-「最近连接」列显示**最近一次「连接」操作**的结果（`可达(时间)` / `尚未连接`），它**不是**独立的网络探测。
-
-**托盘**：左键点击图标打开主窗口；右键菜单提供 状态、启动、停止、应用更改（仅在有未保存更改时出现）、
-打开主窗口、退出。**关闭主窗口只是隐藏到托盘**，不会退出程序。
-
-**配置不可用**：如果配置文件无法解析，程序会显示「配置不可用」，在修复前**不会**启动重定向、
-也**不会**覆盖该文件。处置方式有两种：① 复制路径后人工修复；② 用空配置重新开始
-（原文件会被**改名**为 `config.json.corrupt-<时间戳>`，内容完整保留、不删除）。
-*若配置的 `schema_version` 高于本程序支持的版本，则**只提供**①。*
+- The migration happens **exactly once**: after the rename there is no `config.json` at the old location.
+- ⛔ There is **no "fall back to `%APPDATA%`" path**: after the migration the program **no longer reads
+  or writes** `%APPDATA%`.
+- Once you are sure you no longer need the old file, you may delete `config.json.migrated-<timestamp>`
+  yourself — ⚠️ **it contains plaintext passwords just like `config.json`** (see §6).
 
 ---
 
-## 6. 配置文件
+## 6. Configuration file
 
 ```text
-%APPDATA%\anSMBwinRedirector\config.json
+<directory containing anSMBwinRedirector.exe>\config.json
 ```
+
+- Backup and temp files live in the **same directory**: `config.json.bak` (previous valid config) and
+  `config.json.tmp` (in-flight write).
+- **The first start does not create the file**: it appears only on your first "Apply Changes".
+- Saving works by "write a temp file first, then perform one file replacement": the program **never
+  deletes the current valid `config.json` first** (⚠️ it does **not** promise disk-level atomicity
+  against power loss or crashes).
 
 ```json
 {
   "schema_version": 2,
   "targets": [
     {
-      "id": "<稳定 UUID>",
+      "id": "<stable UUID>",
       "android_ip": "192.168.1.100",
       "android_port": 4450,
       "username": "ansmb",
@@ -185,63 +216,157 @@ anSMBwinRedirector-<版本>-win-x64/
 }
 ```
 
-- `id` 由程序生成并保持稳定；**`android_ip` 在规则集合内唯一**，重复会被拒绝。
-- 每条规则可配四项：**Android IP**、**Android SMB 端口**、**用户名**、**密码**
-  （后两项可留空；要么都填，要么都空）。Windows 侧匹配的 **TCP 445** 是固定项，不可配置。
-- 保存时会生成 `config.json.bak`。**读取配置的过程不会写任何文件。**
+- `id` is generated by the program and stays stable; **`android_ip` must be unique** within the rule
+  set — duplicates are rejected.
+- Each rule has four configurable fields: **Android IP**, **Android SMB port**, **username**,
+  **password** (the last two may be empty; either both or neither). The matching Windows-side **TCP
+  445** is fixed and not configurable.
+- `targets` may be empty (meaning "no redirect target configured").
 
-> ⚠️ **v0.x 的已知取舍：`config.json` 里的密码是明文保存的。**
-> 本程序**不宣称**提供安全存储 —— 既不对该文件加密，也不把配置本身放进 Windows 凭据管理器。
-> 该文件位于你的用户配置目录、继承该目录的访问控制；请自行保证账户与磁盘的安全。
-> （「连接」时写入的 Windows 凭据由**系统凭据管理器**保管，与这个文件无关。）
-> ⛔ 密码**不会**出现在日志、诊断详情、调试窗口、错误提示或窗口标题里。
-
----
-
-## 7. 网络模型（一句话版）
-
-对每个目标，程序只做一件事：把**目的端口** `445` 改成你配置的端口（**目的 IP 不变、
-不改 Windows 源端口**），并在返回方向把源端口改回来。
-它**不是**"本机 445 → 4450 的端口转发"，也**不是**任意 `FROM → TO` 的通用 NAT；
-`netsh interface portproxy` 之类的工具**不能**替代它。
+> ⚠️ **Known trade-off in v0.x/v1.0: the password in `config.json` is stored in plaintext.**
+> The program does **not claim** secure storage — it neither encrypts the file nor puts the
+> configuration itself into the Windows credential manager. The file sits next to the exe and
+> inherits that directory's access control; please secure the directory and the disk yourself.
+> **`config.json.bak` and any leftover `config.json.migrated-<timestamp>` contain plaintext passwords too.**
+> (The Windows credentials written by "Connect" are kept by the **system credential manager** and are
+> unrelated to these files.)
+> ⛔ Passwords **never** appear in logs, diagnostics details, the Debug window, error messages or window titles.
 
 ---
 
-## 8. 已知限制（v1）
+## 7. Config Unavailable (and "directory not writable")
 
-- 仅 **Windows x64**；不提供 32 位、ARM64 支持（ARM64 会显式拒绝）。
-- ⛔ **不提供**"强制清理 / 绕过接管"的 WinDivert 卸载入口（服务生命周期见 §4.1）。
-- **不提供**安装器；**不提供**自动更新。
-- 不做 SMB 服务器或客户端，不做通用端口转发/代理，不支持 UDP。
-- ⛔ 不提供密码加密存储（v0.x 取舍，见 §6）。
-- ⚠️ 目标地址**不可达**时，点「连接」可能**长时间（实测 >3 分钟）没有结果反馈** ——
-  这是 Windows 打开 `\\<IP>\` 时的系统行为所致，不是本程序的判定问题。
+**Principle**: any **read / parse / validation** failure, or an **unwritable config directory**, puts
+the program into the **Config Unavailable** state. In that state the program:
 
----
-
-## 9. 从源码构建
-
-需要 Go（版本见 `src/go.mod`）。发布包由脚本组装（会校验哈希链并打印）：
-
-```sh
-scripts/build-release.sh 1.0          # 产物在 src/dist/release/
+```text
+- loads no targets at all;
+- creates no runtime and opens no WinDivert handle;
+- disables "Start" (so it can never enter the running state);
+- disables "Apply Changes" (to avoid overwriting a repairable file);
+- does not fall back to reading the old %APPDATA% configuration;
+- does not silently continue with an empty config, and never deletes or rewrites any file;
+- shows the file path plus the failure reason, with an entry point such as "Copy config path"
+  for manual repair.
 ```
 
-要点：
+**Write probe at startup**: on every start the program performs one **lightweight write probe** in the
+config directory (= the exe's directory) — it creates a **dedicated, uniquely named** probe file
+(filename prefix `.ansmbwinredirector-write-probe-`), writes a few bytes and **deletes it immediately**.
 
-- **Manifest 是必需的**：GUI 框架 `lxn/walk` 需要 Common-Controls v6 清单，缺失会导致窗口**完全建不出来**。
-  清单以 `.syso` 资源形式**内嵌**（`cmd/ansmbwinredirector/rsrc_amd64.syso`），
-  该文件由 `go tool rsrc`（版本锁在 `go.mod` 的 `tool` 指令里）**可复现地**重新生成；
-  构建脚本会重新生成并与其**逐字节比对**，不一致直接失败。
-- **WinDivert 的 SHA-256 固化为编译期常量**（`src/internal/winvert/assets_common.go`）。
-  升级 WinDivert 时必须同步更新这些常量 —— `go test ./internal/winvert` 会强制这一点。
+- The probe only cleans up **the file it created itself**; ⛔ it never uses user file names such as
+  `config.json`, so it **cannot** leave an empty `config.json` behind.
+- If the probe fails (or if **cleaning up** the probe file fails) ⇒ the program goes straight into
+  Config Unavailable, reporting the **directory path plus the underlying error**.
+- ⚠️ A successful probe does **not** guarantee that saving will succeed: the actual save still checks
+  every write / backup / replacement step independently.
+
+**Common causes**
+
+| Symptom | Action |
+| --- | --- |
+| `CONFIG_IO_ERROR` (directory not writable / insufficient permissions) | Make the program directory writable (or move it to a writable directory); e.g. **avoid** `C:\Program Files\` with default permissions |
+| `CONFIG_IO_ERROR` (probe file cannot be cleaned up) | Check whether security software is locking the directory; this is also treated as "not writable" |
+| `CONFIG_PARSE_ERROR` / `CONFIG_VALIDATION_FAILED` | Use "Copy config path" to open and repair the file by hand; the UI lists **all** violations |
+| `CONFIG_SCHEMA_UNSUPPORTED` (file written by a newer version) | ⛔ The program deliberately does **not** offer "restart with an empty config"; use the newer version instead (to prevent accidental downgrade damage) |
 
 ---
 
-## 10. 许可证
+## 8. Using the UI
 
-- 本项目：**GNU GPLv3 —— 具体为 `GPL-3.0-only`**（即"仅 GPLv3"，**不含** "or any later version"）。
-  `LICENSE` 是 GNU 官方的 GPLv3 **全文**（未做任何修改，包含文末"How to Apply"一节的示例文本）。
-- 随包分发的第三方组件及其许可全文：见 `THIRD_PARTY_NOTICES.md`
-  （**WinDivert** 采用 LGPLv3 / GPLv2 双许可，本项目**择 LGPLv3**，并因此把它的
-  `WinDivert.dll` / `WinDivert64.sys` 作为**独立文件**分发以保持可替换）。
+**Main window**
+
+| Control | Description |
+| --- | --- |
+| Add / Edit / Delete | These only change the **draft**; "Edit" lets you set IP / port / username / password; a deleted row becomes "pending delete" and, while it is selected, the "Delete" button turns into "Undo delete" |
+| **Apply Changes** | The **only** commit path: validate → write to disk (next to the exe, keeping a `.bak`) → take effect. The status bar shows `⚠ Unsaved changes` while a draft differs |
+| Start / Stop | Start/stop redirection for all targets ("Start" first performs the WinDivert takeover — see §4.1) |
+| **Connect** | Opens that target's shares: writes the Windows credentials first (if the target has a username/password) and then opens `\\<Android IP>\` through the system default handler. **Requires that target to be running** (⛔ it will not auto-"Start"). If Windows already has credentials for that IP, it **asks before replacing** them |
+| Debug | see §4.2 |
+| Copy details / Copy config path | Put diagnostics / the configuration file path on the clipboard |
+| Exit | If there are unsaved changes it asks "Save and apply / Discard / Cancel" |
+
+**List interactions**: **single click = select** (does not open the editor); **double click = edit**;
+**right click = context menu (Connect / Edit / Delete)**.
+The "Last connect" column shows the result of the **most recent "Connect" action** (`Reachable(time)` /
+`Not connected yet`); it is **not** an independent network probe.
+
+**Tray**: left-click the icon to show the main window; the right-click menu offers status, start, stop,
+apply changes (only when there are unsaved changes), show main window, and exit.
+**Closing the main window only hides it to the tray**; it does not exit the program.
+
+---
+
+## 9. Network model (one sentence)
+
+For each target the program does exactly one thing: rewrite the **destination port** `445` to the port
+you configured (**the destination IP is unchanged and the Windows source port is untouched**), and
+restore the source port in the reverse direction. It is **not** "a local 445 → 4450 port forward", nor
+a generic `FROM → TO` NAT; tools such as `netsh interface portproxy` **cannot** replace it.
+
+---
+
+## 10. Troubleshooting
+
+| Symptom | Likely cause / action |
+| --- | --- |
+| `RUNTIME_FILE_MISSING` / `RUNTIME_FILE_CORRUPT` at startup | `WinDivert.dll` / `WinDivert64.sys` in the same directory are missing or modified: put the correct files back (the program **never** downloads or overwrites them) |
+| "Cannot take over the system WinDivert service" (`WINDIVERT_TAKEOVER_FAILED`) | The service cannot be stopped/deleted (possibly in use by another program): retry later, or reboot and try again |
+| The status bar shows "Config unavailable" | See §7: repair the config file or make the directory writable; until then the program will not start redirection and will not overwrite the file |
+| "My targets disappeared after upgrading" | Check whether `config.json` now exists next to the exe; the old configuration is renamed to `config.json.migrated-<timestamp>` (see §5) |
+| "Connect" shows **no feedback for a long time** | When the target address is unreachable, Windows may take a long time to return from opening `\\<IP>\` (measured: >3 minutes). This is **system behaviour**, not a verdict from this program; the buttons stay disabled meanwhile |
+| Explorer asks for a username/password | That target has no credentials configured; fill in username/password under "Edit", press "Apply Changes", then use "Connect" to store them in the Windows credential manager |
+| Want to fully clean up WinDivert leftovers | See §4.1: the program offers no force-cleanup entry point; follow WinDivert's official instructions |
+
+---
+
+## 11. Known limitations (v1.0)
+
+- **Windows x64 only**; no 32-bit and no ARM64 support (ARM64 is explicitly rejected).
+- **The exe's directory must be writable**: the configuration and its backup are written there (§6/§7).
+- ⛔ **No** "force cleanup / bypass-the-takeover" WinDivert uninstall entry point (§4.1).
+- **No** installer, **no** auto-update, **no** code-signed package.
+- It is neither an SMB server nor an SMB client, not a generic port forwarder/proxy, and it does not
+  support UDP.
+- ⛔ **No** encrypted password storage (plaintext trade-off — §6).
+- ⚠️ When the target address is **unreachable**, "Connect" may show **no result for a long time
+  (measured: >3 minutes)** — this is how Windows behaves when opening `\\<IP>\`.
+- ⛔ **No promise** of disk-level atomicity for config writes in extreme situations (power loss, crash) — §6.
+
+---
+
+## 12. Building from source
+
+Go is required (version in `src/go.mod`). The release package is assembled by a script that verifies
+the hash chain and prints it:
+
+```sh
+scripts/build-release.sh 1.0          # output under src/dist/release/
+```
+
+Key points:
+
+- The package contains **exactly 7 files** (§2); `src/dist/` is ignored by `.gitignore`.
+- **The manifest is mandatory**: the GUI toolkit `lxn/walk` needs a Common-Controls v6 manifest;
+  without it the window **cannot be created at all**. The manifest is **embedded** as a `.syso`
+  resource (`cmd/ansmbwinredirector/rsrc_amd64.syso`), which `go tool rsrc` (version pinned via the
+  `tool` directive in `go.mod`) can regenerate **reproducibly**; the release script regenerates it and
+  compares it **byte-for-byte**, failing on any difference.
+- **The WinDivert SHA-256 values are frozen as compile-time constants**
+  (`src/internal/winvert/assets_common.go`). When upgrading WinDivert you must update those constants
+  too — `go test ./internal/winvert` enforces this.
+- ⚠️ The executable is **not** byte-for-byte reproducible across builds: the script injects the
+  **build time** into the exe's version information, so each build has a different hash (the other six
+  files are byte-for-byte copies of repository content). To check which commit an exe came from, read
+  its **embedded `vcs.revision` / `vcs.modified` and version strings**.
+
+---
+
+## 13. License
+
+- This project: **GNU GPLv3 — specifically `GPL-3.0-only`** (i.e. "GPLv3 only", **without** "or any
+  later version"). `LICENSE` is the verbatim GNU GPLv3 **full text** (unmodified, including the
+  "How to Apply" section at the end).
+- Third-party components shipped in the package and their full licenses: see `THIRD_PARTY_NOTICES.md`
+  (**WinDivert** is dual-licensed LGPLv3 / GPLv2; this project chooses **LGPLv3**, which is why its
+  `WinDivert.dll` / `WinDivert64.sys` are distributed as **separate files** to keep them replaceable).

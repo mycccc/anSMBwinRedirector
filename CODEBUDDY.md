@@ -20,7 +20,7 @@ This file provides guidance to CodeBuddy Code when working with code in this rep
 > **阶段 1（技术验证）PASS → 阶段 2（最小实现）已在 Windows 实机验证 → 2.7 Packaging 已 APPROVED。**
 > 正式源码在 `src/`；**产品入口 = GUI / 托盘 `cmd/ansmbwinredirector`**。
 
-- 根目录：`AGENTS.md`、`CODEBUDDY.md`、`README.md`、`LICENSE`、`THIRD_PARTY_NOTICES.md`、`scripts/`、`.gitignore`、`src/`、`local_dev/`（最后一项被 `.gitignore` 整体忽略，**永不提交**）。
+- 根目录：`AGENTS.md`、`CODEBUDDY.md`、`README.md`（英文，用户/发布包用）、`README.zh-CN.md`（中文，**仅源码仓库**，不随发布包分发）、`LICENSE`、`THIRD_PARTY_NOTICES.md`、`scripts/`、`.gitignore`、`src/`、`local_dev/`（最后一项被 `.gitignore` 整体忽略，**永不提交**）。
 - `src/`（`module ansmbwinhelper`）：
   - `cmd/ansmbwinredirector/` — **产品入口**（GUI / 托盘）+ `anSMBwinRedirector.manifest` + `rsrc_amd64.syso`
   - `cmd/devconsole/` — **非产品**的控制台集成入口（原第一轮入口）
