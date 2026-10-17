@@ -18,20 +18,26 @@ type tableColumn struct {
 	Width int
 }
 
-// tableColumns 的列顺序即渲染顺序。
+// tableColumns 返回表格列定义（**调用时**才解析文案）；列顺序即渲染顺序。
 //
 // ⚠️ `运行态` 与 `可达性` 是**两列**（decisions/008 §0 对 003 的细化）：
 // 两者正交（007 §4.2 四维模型），合并成一列会让"运行中但 Android 没开"变成看起来像故障。
 //
 // ⚠️ `用户名` 列来自 **Draft**（decisions/012 §3.1：Target 含凭据字段）。
 // ⛔ **没有密码列**，也**不得**用任何可推断密码的占位（长度/掩码字符数）。
-var tableColumns = []tableColumn{
-	{Title: "Android IP", Width: 150},
-	{Title: T("table.smb_port"), Width: 85},
-	{Title: T("table.username"), Width: 110},
-	{Title: T("table.runtime"), Width: 140},
-	{Title: T("table.reachability"), Width: 140},
-	{Title: T("table.note"), Width: 240},
+//
+// ⛔ 不得写成包级 `var`：包初始化早于入口的 `gui.SetTranslator` / `i18n.SetDefault`，
+// 那时 `T()` 只能返回 key 本身，列标题会被**永久冻结**成 `table.runtime` 这类原始键
+// （v1.0 实机缺陷，2026-10-17 手动测试发现）。必须在窗口构造时（注入翻译器之后）求值。
+func tableColumns() []tableColumn {
+	return []tableColumn{
+		{Title: "Android IP", Width: 150},
+		{Title: T("table.smb_port"), Width: 85},
+		{Title: T("table.username"), Width: 110},
+		{Title: T("table.runtime"), Width: 140},
+		{Title: T("table.reachability"), Width: 140},
+		{Title: T("table.note"), Width: 240},
+	}
 }
 
 // guiRow 是表格的一行（**渲染专用**）。

@@ -223,8 +223,9 @@ func (g *gui) build() error {
 }
 
 func columns() []TableViewColumn {
-	out := make([]TableViewColumn, 0, len(tableColumns))
-	for _, c := range tableColumns {
+	cols := tableColumns() // 调用时求值：此时翻译器已注入（见 tableColumns 注释）
+	out := make([]TableViewColumn, 0, len(cols))
+	for _, c := range cols {
 		out = append(out, TableViewColumn{Title: c.Title, Width: c.Width})
 	}
 	return out
