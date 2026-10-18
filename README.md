@@ -35,6 +35,19 @@ an SMB client, and it does not handle UDP.
 
 > Chinese documentation: [`README.zh-CN.md`](README.zh-CN.md) (source repository only).
 
+![The "Add target" dialog](assets/screenshots/add-target.png)
+
+*The **Add** dialog: Android IP, the Android SMB port (default `4450`), and optional credentials.*
+
+![Target list and context menu](assets/screenshots/list-and-context-menu.png)
+
+*The target list: `Runtime` and `Last connect` are two independent columns (§5); right-click gives
+**Connect / Edit / Delete**.*
+
+> The screenshots live in the source repository under `assets/screenshots/`. The release package is
+> fixed at 7 files and **contains no images**, so they will not render when this file is read from the
+> package.
+
 ---
 
 ## 1. Requirements and installation
@@ -46,6 +59,7 @@ an SMB client, and it does not handle UDP.
 | Same-directory files | **`WinDivert.dll` and `WinDivert64.sys` must sit next to the exe**; both are required (see §6) |
 | Directory | **The directory containing the exe must be writable** (the config, its backup and its temp file are written there — see §4) |
 | Network | Must be able to reach the target Android device's IP |
+| Android side | You must run `anSMBserver` on the device yourself and know which port it listens on; this project **does not include or provide** it |
 
 > ⛔ **Windows on ARM64 is not supported**: an amd64 binary may run under emulation, but a kernel
 > driver must be ARM64, so the bundled amd64 `WinDivert64.sys` cannot load. The program **refuses to
@@ -71,9 +85,9 @@ anSMBwinRedirector-<version>-win-x64/
   shipped in the release package (the package is fixed at the 7 files listed above).
 - ⚠️ **Do not put it in a directory you cannot write to** (e.g. `C:\Program Files\...` with default
   permissions): the first save would fail, and the program treats "config directory not writable" as
-  **Config Unavailable** (§4.4).
+  **Config Unavailable** (§4.3).
 - The directory is **self-contained**: if you move or rename it, the configuration and the WinDivert
-  files move with it (§4.3).
+  files move with it (§4.1).
 
 ### 1.1 What it touches on your system
 
@@ -90,7 +104,7 @@ Windows system facilities, which is a different thing from "writing files somewh
 
 ---
 
-## 2. Quick start (30 seconds)
+## 2. Quick start
 
 1. Extract the release package into a **writable** directory.
 2. Right-click `anSMBwinRedirector.exe` → **Run as administrator**.
@@ -115,9 +129,7 @@ The program does not modify the system proxy and does not use `netsh portproxy`.
 
 ## 3. First run (detailed)
 
-The steps below describe a machine with **no existing configuration and nothing to migrate**. If an
-older version's configuration is present, the program migrates it **during startup**, before the
-window is usable — see §4.3.
+The steps below describe a machine that **has no configuration file yet**.
 
 1. Right-click `anSMBwinRedirector.exe` → **Run as administrator**.
 2. The main window appears (along with a tray icon). **No configuration file is created yet** — the
@@ -138,7 +150,7 @@ window is usable — see §4.3.
 
 ---
 
-## 4. Configuration file and legacy migration
+## 4. Configuration file
 
 ### 4.1 Location and format
 
@@ -184,28 +196,7 @@ window is usable — see §4.3.
 So a `.bak` present means "you have saved at least twice, and this is the version from before your
 last save". It is **not** a rolling history — there is only ever one `.bak`.
 
-### 4.3 Upgrading from an older version (one-time legacy migration)
-
-Older versions kept the configuration at `%APPDATA%\anSMBwinRedirector\config.json`. **It now lives
-next to the exe.** On startup, the program looks at both locations. The migration is **one-time** and
-happens **before** the configuration is loaded:
-
-| Situation | What the program does |
-| --- | --- |
-| New location has **no** config, old location has a **usable** one | Read and validate the old config → **safely write** it to the new location → **read it back and verify** → **rename** the old file to `config.json.migrated-<timestamp>` (content fully preserved, ⛔ never deleted). The migrated targets are **loaded normally** |
-| New location **already has** a config | The **new location wins**; the old file is **left untouched** (a note is added to "Recent events") |
-| The old config is **unusable** (parse/validation failure) | ⛔ **no migration, no rename**; the old file is left as-is, and a diagnosable note is logged. The new location has no config, so the program starts with an **empty configuration** — see 4.5 |
-| **Writing** the new config fails (or the read-back check fails) | The newly written file is rolled back; the old file stays **byte-for-byte identical**; a note is logged. The program starts with an **empty configuration** — see 4.5 |
-| Only the **rename of the old file** fails | The migrated config **is already at the new location and is used normally**. The old file stays exactly where it was — nothing is lost |
-
-- The migration happens **exactly once**: after a successful rename there is no `config.json` at the
-  old location any more.
-- ⛔ There is **no "fall back to `%APPDATA%`" path**: the old location is only ever **read** (as a
-  migration source). The program never writes to it and never reads it once migration is done.
-- Once you are sure you no longer need it, you may delete the `config.json.migrated-<timestamp>`
-  file yourself — ⚠️ **it contains plaintext passwords just like `config.json`** (see §8).
-
-### 4.4 "Config Unavailable"
+### 4.3 "Config Unavailable"
 
 **Principle**: if the configuration **in the exe's directory** cannot be used, the program refuses to
 pretend it has a configuration. This state is entered when:
@@ -221,7 +212,6 @@ In the **Config Unavailable** state the program:
 - creates no runtime and opens no WinDivert handle;
 - disables "Start" (so it can never enter the running state);
 - disables "Apply Changes" (to avoid overwriting a repairable file);
-- does not fall back to reading the old %APPDATA% configuration;
 - never silently continues with an empty config, and never deletes or rewrites any file on its own;
 - shows the file path plus the failure reason, and offers two explicit actions (below).
 ```
@@ -254,17 +244,6 @@ config directory (= the exe's directory) — it creates a **dedicated, uniquely 
 | `CONFIG_PARSE_ERROR` / `CONFIG_VALIDATION_FAILED` | Use "Copy config path" to get the path, then open that path **yourself** in a text editor and repair it by hand; the UI lists **all** violations |
 | `CONFIG_SCHEMA_UNSUPPORTED` (file written by a newer version) | "Restart with empty config" stays **disabled** on purpose; use the newer version instead (to prevent accidental downgrade damage) |
 
-### 4.5 Config Unavailable is **not** the same as "migration failed"
-
-These two situations look similar in a screenshot and are frequently confused:
-
-| | **Config Unavailable** (§4.4) | **Legacy migration did not complete** (§4.3) |
-| --- | --- | --- |
-| Which file | The config **in the exe's directory** (`config.json`) — or the directory itself | The **old** config at `%APPDATA%\anSMBwinRedirector\config.json` |
-| What the program does | Refuses to load anything; **Start** and **Apply Changes** are disabled | Starts **normally**, just with an **empty configuration**; **Start** and **Apply Changes** work, so you can add targets again |
-| Your data | Untouched — nothing is written or deleted | The old file is **untouched** (it stays exactly where it is); ⛔ nothing is deleted |
-| How to tell | The status bar says "Config unavailable" | The new location simply has no `config.json` yet; the old file is still at the old path and "Recent events" has a note |
-
 ---
 
 ## 5. Tray and main window
@@ -279,7 +258,7 @@ These two situations look similar in a screenshot and are frequently confused:
 | **Connect** | Opens that target's shares. **Requires the target to be saved and running** (⛔ it will not auto-"Start" — see §2). If Windows already has credentials for that IP, it **asks before replacing** them |
 | Debug | see §6.2 |
 | Copy details / Copy config path | Put the **diagnostics text** / the **path** of `config.json` on the clipboard (⛔ neither opens a window, a file or a folder) |
-| Restart with empty config | Only shown in the "Config unavailable" banner — see §4.4 |
+| Restart with empty config | Only shown in the "Config unavailable" banner — see §4.3 |
 | Exit | If there are unsaved changes it asks "Save and apply / Discard / Cancel" |
 
 **List interactions**: **single click = select** (does not open the editor); **double click = edit**;
@@ -312,14 +291,22 @@ third-party component **WinDivert 2.2.2-A**.
 
 ### 6.1 This program owns the WinDivert service lifecycle (Start / Stop / Exit)
 
-**On "Start" (takeover)**: if a `WinDivert` service **already exists** (left behind by another tool or
-an older version), the program first **stops and deletes** it, waits until it is gone (`sc query`
+> ⚠️ **This can affect other software that uses WinDivert**
+>
+> "Start" **takes over the system service named `WinDivert`**: if one already exists (created by
+> another tool), the program first **stops and deletes** it and then installs the driver from its own
+> directory. **Any other software relying on that service may be affected.** The program **cannot
+> enumerate** all WinDivert users on the system (see the end of §6.2), so it **cannot guarantee** that
+> the takeover will not affect them. Close other tools that may be using WinDivert **before** starting.
+
+**On "Start" (takeover)**: if a `WinDivert` service **already exists** (left behind by another tool,
+or left over on the system), the program first **stops and deletes** it, waits until it is gone (`sc query`
 returns **1060**), and only then lets WinDivert install `WinDivert64.sys` **from this program's own
 directory**, verifying that the service's actual `ImagePath` points at this directory.
 
 > ⛔ The program **never reuses** an existing WinDivert service — tests showed that doing so keeps
-> loading a `.sys` from the **old path**. If the takeover fails it reports an explicit error
-> (`WINDIVERT_TAKEOVER_FAILED`) and **never** falls back to the old service.
+> loading a `.sys` from the **previous service path**. If the takeover fails it reports an explicit error
+> (`WINDIVERT_TAKEOVER_FAILED`) and **never** falls back to the pre-existing service.
 
 | Action | Effect on the WinDivert **service** | Effect on the `WinDivert.dll` / `WinDivert64.sys` **files** |
 | --- | --- | --- |
@@ -366,8 +353,7 @@ The "Debug" button opens a **diagnostics** window with three parts:
 | --- | --- |
 | `RUNTIME_FILE_MISSING` / `RUNTIME_FILE_CORRUPT` at startup | `WinDivert.dll` / `WinDivert64.sys` in the same directory are missing or modified: put the correct files back (the program **never** downloads or overwrites them) |
 | "Cannot take over the system WinDivert service" (`WINDIVERT_TAKEOVER_FAILED`) | The service cannot be stopped/deleted (possibly in use by another program): retry later, or reboot and try again |
-| The status bar shows "Config unavailable" | See §4.4: repair the config file or make the directory writable; until then the program will not start redirection and will not overwrite the file |
-| "My targets disappeared after upgrading" | Check the **new** location (next to the exe) first. If migration succeeded, the old config was renamed to `config.json.migrated-<timestamp>`; if the old config was unusable or the migration failed, it is **still at its original path** — see §4.3 and §4.5 |
+| The status bar shows "Config unavailable" | See §4.3: repair the config file or make the directory writable; until then the program will not start redirection and will not overwrite the file |
 | "Connect" shows **no feedback for a long time** | When the target address is unreachable, Windows may take a long time to return from opening `\\<IP>\` (measured: >3 minutes). This is **system behaviour**, not a verdict from this program; the buttons stay disabled meanwhile |
 | "Connect" is refused with "redirection is not running" | "Connect" does not start anything: press "Start" first (§2) |
 | Explorer asks for a username/password | That target has no credentials configured; fill in username/password under "Edit", press "Apply Changes", then use "Connect" to store them in the Windows credential manager |
@@ -384,7 +370,7 @@ The "Debug" button opens a **diagnostics** window with three parts:
 - ⛔ **No** "force cleanup / bypass-the-takeover" WinDivert uninstall entry point (§6.1).
 - **No** installer, **no** auto-update, **no** code-signed package.
 - Unknown fields in `config.json` are **rejected**, not ignored; a `schema_version` from a newer
-  version makes the config unusable by design (§4.4).
+  version makes the config unusable by design (§4.3).
 - It is neither an SMB server nor an SMB client, not a generic port forwarder/proxy, and it does not
   support UDP.
 - ⚠️ When the target address is **unreachable**, "Connect" may show **no result for a long time
@@ -405,9 +391,12 @@ The "Debug" button opens a **diagnostics** window with three parts:
 | --- | --- |
 | `config.json` | **Yes** |
 | `config.json.bak` (from the second save on — §4.2) | **Yes** (it is a copy of a previous config) |
-| `config.json.tmp` | Only transiently, during a save |
-| `config.json.migrated-<timestamp>` (migration leftovers — §4.3) | **Yes** (it is the old config, preserved) |
-| `config.json.corrupt-<timestamp>` (created by "Restart with empty config" — §4.4) | **Yes** (it is the old config, preserved) |
+| `config.json.tmp` | Only transiently during a normal save; if a save is **interrupted abnormally** (power loss, crash, forced termination) it **may be left behind**. It contains plaintext passwords just like `config.json` |
+| `config.json.corrupt-<timestamp>` (created by "Restart with empty config" — §4.3) | **Yes** (it is the previously used config, preserved unchanged) |
+| `config.json.migrated-<timestamp>` (if present in the directory) | **Yes** (it is a copy of a config, including any plaintext passwords in it) |
+
+⚠️ If the directory also contains `config.json*` files whose origin you cannot identify (for example
+copies with a timestamp suffix), treat them as **credential material** as well.
 
 ⚠️ **Consequence**: when you **move, copy, share, back up or delete** the program directory, treat all
 of these files as **credential material**, not as ordinary text. Deleting only `config.json` leaves
@@ -419,14 +408,37 @@ error messages or window titles.)
 
 ---
 
-## 9. License and third-party components
+## 9. License, third-party components and acknowledgements
 
-- This project: **GNU GPLv3 — specifically `GPL-3.0-only`** (i.e. "GPLv3 only", **without** "or any
-  later version"). `LICENSE` is the verbatim GNU GPLv3 **full text** (unmodified, including the
-  "How to Apply" section at the end).
-- Third-party components shipped in the package and their full licenses: see `THIRD_PARTY_NOTICES.md`
-  (**WinDivert** is dual-licensed LGPLv3 / GPLv2; this project chooses **LGPLv3**, which is why its
-  `WinDivert.dll` / `WinDivert64.sys` are distributed as **separate files** to keep them replaceable).
+### 9.1 Project license
+
+This project is licensed under **GNU GPLv3 — specifically `GPL-3.0-only`** (i.e. "GPLv3 only",
+**without** "or any later version"). `LICENSE` is the verbatim GNU GPLv3 **full text** (unmodified,
+including the "How to Apply" section at the end).
+
+### 9.2 Third-party components shipped in the package
+
+The component list, versions and **full license texts** are in `THIRD_PARTY_NOTICES.md`. In short:
+
+- **WinDivert 2.2.2-A**: dual-licensed LGPLv3 / GPLv2; this project chooses **LGPLv3**, which is why
+  its `WinDivert.dll` / `WinDivert64.sys` are distributed as **separate files** to keep them
+  replaceable.
+- Go dependencies (`lxn/walk`, `lxn/win`, `govaluate`, `golang.org/x/sys`, `imgk/divert-go`) are
+  **compiled into the exe** and not shipped as separate files; their full license texts are also
+  included in `THIRD_PARTY_NOTICES.md`.
+
+### 9.3 Acknowledgements and reference projects
+
+This project benefited from the following open-source projects. Many thanks to their authors and
+contributors.
+
+- [**WinDivert**](https://github.com/basil00/Divert): provides Windows packet filtering and handling,
+  which this project uses to implement transparent TCP destination-port rewriting. Version,
+  distributed files and license information: see §9.2.
+- [**detour**](https://github.com/LeeJeKyun/detour): a **design reference** for this project — a
+  Go-based Windows network redirection tool whose program structure and GUI informed this
+  implementation. **No source code from it is reused** (see `THIRD_PARTY_NOTICES.md` §1.3); this
+  project is an independent implementation targeting the `anSMBserver` use case.
 
 ---
 
@@ -435,12 +447,12 @@ error messages or window titles.)
 Requires **Go 1.27.1** (see `src/go.mod`) on any platform that can cross-compile to Windows.
 
 ```sh
-scripts/build-release.sh 1.0          # output under src/dist/release/
+scripts/build-release.sh 1.0          # output under dist/release/
 ```
 
 Key points:
 
-- The package contains **exactly 7 files** (§1); `src/dist/` is ignored by `.gitignore`.
+- The package contains **exactly 7 files** (§1); `dist/` is ignored by `.gitignore`.
 - **The manifest is mandatory**: the GUI toolkit `lxn/walk` needs a Common-Controls v6 manifest;
   without it the window **cannot be created at all**. The manifest is **embedded** as a `.syso`
   resource (`cmd/ansmbwinredirector/rsrc_amd64.syso`), which `go tool rsrc` (version pinned via the

@@ -1,10 +1,14 @@
 # Local development workspace (never committed)
 /local_dev/
 
+# Local agent rules (kept in the working tree, never published)
+/AGENTS.md
+/CODEBUDDY.md
+
 # macOS
 .DS_Store
 
-# Build artifacts (Go)
-/src/dist/
+# Build artifacts (Go) — local output directory, sibling of src/
+/dist/
 *.exe
 *.test

@@ -30,6 +30,7 @@ SYSO_REL="cmd/ansmbwinredirector/rsrc_amd64.syso"
 ASSETS_REL="internal/winvert/assets"
 CONST_REL="internal/winvert/assets_common.go"
 LANG_REL="internal/i18n/assets/language.json"
+DIST="${REPO}/dist"          # 本地构建产物（.gitignore 忽略），与 src/ 平级
 
 die() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 ok()  { printf '\033[32m✓ %s\033[0m\n' "$*"; }
@@ -59,7 +60,7 @@ GOMOD_GO="$(awk '/^go /{print $2}' go.mod)"
 COMMIT="$(git -C "${REPO}" rev-parse --short HEAD 2>/dev/null || echo none)"
 BUILD_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 PKG_NAME="anSMBwinRedirector-${VERSION}-win-x64"
-OUT_DIR="${SRC}/dist/release/${PKG_NAME}"
+OUT_DIR="${DIST}/release/${PKG_NAME}"
 
 say "0. 参数"
 cat <<EOF
@@ -147,8 +148,8 @@ PKG_SYS_SHA="$(shasum -a 256 "${OUT_DIR}/WinDivert64.sys" | awk '{print $1}')"
 [ "${PKG_SYS_SHA}" = "${CONST_SYS}" ] || die "发布包里的 WinDivert64.sys 哈希与常量不符"
 ok "发布包内两个 WinDivert 文件与常量一致"
 
-( cd "${SRC}/dist/release" && shasum -a 256 "${PKG_NAME}"/* > "${PKG_NAME}.sha256" )
-ok "已写出 ${SRC}/dist/release/${PKG_NAME}.sha256"
+( cd "${DIST}/release" && shasum -a 256 "${PKG_NAME}"/* > "${PKG_NAME}.sha256" )
+ok "已写出 ${DIST}/release/${PKG_NAME}.sha256"
 
 say "可追溯链"
 cat <<EOF
